@@ -141,6 +141,9 @@ set_task_offsets(dtrace_hdl_t *dtp)
 	ctf_membinfo_t ctm;
 	ctf_file_t *cfp = dtp->dt_shared_ctf;
 
+	if (!cfp)
+		return dt_set_errno(dtp, EDT_NOCTF);
+
 	type = ctf_lookup_by_name(cfp, "struct task_struct");
 	if (type == CTF_ERR)
 		return -1;
