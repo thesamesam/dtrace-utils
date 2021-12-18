@@ -141,7 +141,6 @@ typedef struct dtrace_stmtdesc {
 	dtrace_attribute_t dtsd_descattr;	/* probedesc attributes */
 	dtrace_attribute_t dtsd_stmtattr;	/* statement attributes */
 	int dtsd_clauseflags;			/* clause flags */
-	int dtsd_padding;			/* work around GCC bug 36043 */
 } dtrace_stmtdesc_t;
 
 /* dtsd clause flags */
