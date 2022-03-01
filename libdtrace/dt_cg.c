@@ -2039,7 +2039,7 @@ dt_cg_setx(dt_irlist_t *dlp, int reg, uint64_t x)
  * user=1 sign=1 size=4 => binary index 11011 = decimal index 27
  */
 static uint_t
-dt_cg_load(dt_node_t *dnp, ctf_file_t *ctfp, ctf_id_t type)
+dt_cg_load(dt_node_t *dnp, ctf_file_t *ctfp, ctf_id_t type, ssize_t *ret_size)
 {
 #if 1
 	ctf_encoding_t e;
@@ -2060,6 +2060,9 @@ dt_cg_load(dt_node_t *dnp, ctf_file_t *ctfp, ctf_id_t type)
 		xyerror(D_UNKNOWN, "internal error -- cg cannot load "
 		    "size %ld when passed by value\n", (long)size);
 	}
+
+	if (ret_size)
+		*ret_size = size;
 
 	return ldstw[size];
 #else
@@ -2099,6 +2102,9 @@ dt_cg_load(dt_node_t *dnp, ctf_file_t *ctfp, ctf_id_t type)
 		size |= 0x08;
 	if (dnp->dn_flags & DT_NF_USERLAND)
 		size |= 0x10;
+
+	if (ret_size)
+		*ret_size = size;
 
 	return ops[size];
 #endif
@@ -2194,6 +2200,38 @@ dt_cg_check_bounds(dt_irlist_t *dlp, dt_regset_t *drp, int regptr, int basereg,
 		emit(dlp,  BPF_ALU64_REG(BPF_ADD, reg, basereg));
 
 	dt_cg_check_fault(yypcb);
+}
+
+/*
+ * For an alloca'ed allocation, verify that a read/write op on the pointer REG
+ * of size SIZE lands entirely within scratch space.  On return, REG is
+ * bounds-checked.  If SIZEMAX is >-1, SIZE is a register, with a max
+ * allowed value given by SIZEMAX.
+ */
+static void
+dt_cg_check_scratch_bounds(dt_irlist_t *dlp, dt_regset_t *drp, int reg, int size,
+	int sizemax)
+{
+	int	opt_scratchsize = yypcb->pcb_hdl->dt_options[DTRACEOPT_SCRATCHSIZE];
+	int	scratchlen, scratchbot;
+
+	if ((scratchlen = dt_regset_alloc(drp)) == -1 ||
+	    (scratchbot = dt_regset_alloc(drp)) == -1)
+		longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+
+	emit(dlp,  BPF_LOAD(BPF_DW, scratchlen, BPF_REG_FP, DT_STK_DCTX));
+	emit(dlp,  BPF_LOAD(BPF_DW, scratchlen, scratchlen, DCTX_MST));
+	emit(dlp,  BPF_LOAD(BPF_DW, scratchlen, scratchlen,
+			    DMST_SCRATCH_TOP));
+	emit(dlp, BPF_ALU64_IMM(BPF_AND, scratchlen, clp2(opt_scratchsize + 1) - 1));
+
+	emit(dlp, BPF_LOAD(BPF_DW, scratchbot, BPF_REG_FP, DT_STK_DCTX));
+	emit(dlp, BPF_LOAD(BPF_DW, scratchbot, scratchbot, DCTX_SCRATCHMEM));
+
+	dt_cg_check_bounds(dlp, drp, 1, scratchbot, reg, size, scratchlen,
+			   sizemax, opt_scratchsize * 2);
+	dt_regset_free(drp, scratchlen);
+	dt_regset_free(drp, scratchbot);
 }
 
 /* Handle loading a pointer to alloca'ed space.  */
@@ -2518,7 +2556,7 @@ dt_cg_field_set(dt_node_t *src, dt_irlist_t *dlp,
 	 * r1 |= r2
 	 */
 	/* FIXME: Does not handle userland */
-	emit(dlp, BPF_LOAD(dt_cg_load(dst, fp, m.ctm_type), r1, dst->dn_reg, 0));
+	emit(dlp, BPF_LOAD(dt_cg_load(dst, fp, m.ctm_type, NULL), r1, dst->dn_reg, 0));
 	dt_cg_setx(dlp, r2, cmask);
 	emit(dlp, BPF_ALU64_REG(BPF_AND, r1, r2));
 	dt_cg_setx(dlp, r2, fmask);
@@ -2547,6 +2585,18 @@ dt_cg_store(dt_node_t *src, dt_irlist_t *dlp, dt_regset_t *drp, dt_node_t *dst)
 		size = clp2(P2ROUNDUP(e.cte_bits, NBBY) / NBBY);
 	else
 		size = dt_node_type_size(dst);
+
+	/*
+	 * If we're loading a writable non-alloca lvalue, and it's a
+	 * dereference, and *its* child is an alloca pointer, then this is a
+	 * dereferenced alloca pointer and needs bounds-checking (which could
+	 * not be done at deref time due to not knowing the size of the write).
+	 */
+	if (dst->dn_flags & DT_NF_WRITABLE && dst->dn_flags & DT_NF_LVALUE
+	    && dst->dn_op == DT_TOK_DEREF && dst->dn_child->dn_flags & DT_NF_ALLOCA) {
+		assert(!(dst->dn_flags & DT_NF_BITFIELD));
+		dt_cg_check_scratch_bounds(dlp, drp, dst->dn_reg, size, -1);
+	}
 
 	if (src->dn_flags & DT_NF_REF)
 		dt_cg_memcpy(dlp, drp, dst->dn_reg, src->dn_reg, size);
@@ -4774,6 +4824,8 @@ dt_cg_node(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp)
 
 		if (!(dnp->dn_flags & DT_NF_REF)) {
 			uint_t	ubit;
+			uint_t	op;
+			ssize_t	size;
 
 			/*
 			 * Save and restore DT_NF_USERLAND across dt_cg_load():
@@ -4785,9 +4837,20 @@ dt_cg_node(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp)
 			    (dnp->dn_child->dn_flags & DT_NF_USERLAND);
 
 			dt_cg_check_notnull(dlp, drp, dnp->dn_reg);
+			op = dt_cg_load(dnp, ctfp, dnp->dn_type, &size);
+
+			/*
+			 * If the child is an alloca pointer, bounds-check it
+			 * now.
+			 */
+			if (dnp->dn_child->dn_flags & DT_NF_ALLOCA) {
+				assert(!(dnp->dn_flags & DT_NF_ALLOCA));
+				dt_cg_check_scratch_bounds(dlp, drp, dnp->dn_reg,
+							   size, -1);
+			}
 
 			/* FIXME: Does not handled signed or userland */
-			emit(dlp, BPF_LOAD(dt_cg_load(dnp, ctfp, dnp->dn_type), dnp->dn_reg, dnp->dn_reg, 0));
+			emit(dlp, BPF_LOAD(op, dnp->dn_reg, dnp->dn_reg, 0));
 
 			dnp->dn_flags &= ~DT_NF_USERLAND;
 			dnp->dn_flags |= ubit;
@@ -4944,7 +5007,8 @@ dt_cg_node(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp)
 			    (dnp->dn_left->dn_flags & DT_NF_USERLAND);
 
 			/* FIXME: Does not handle signed and userland */
-			emit(dlp, BPF_LOAD(dt_cg_load(dnp, ctfp, m.ctm_type), dnp->dn_left->dn_reg, dnp->dn_left->dn_reg, 0));
+			emit(dlp, BPF_LOAD(dt_cg_load(dnp, ctfp, m.ctm_type, NULL),
+					   dnp->dn_left->dn_reg, dnp->dn_left->dn_reg, 0));
 
 			dnp->dn_flags &= ~DT_NF_USERLAND;
 			dnp->dn_flags |= ubit;
@@ -5055,7 +5119,8 @@ dt_cg_node(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp)
 
 			if (!(dnp->dn_flags & DT_NF_REF)) {
 				/* FIXME: NO signed or userland yet */
-				emit(dlp, BPF_LOAD(dt_cg_load(dnp, ctfp, dnp->dn_type), dnp->dn_reg, dnp->dn_reg, 0));
+				emit(dlp, BPF_LOAD(dt_cg_load(dnp, ctfp, dnp->dn_type, NULL),
+						   dnp->dn_reg, dnp->dn_reg, 0));
 			}
 			break;
 		}
