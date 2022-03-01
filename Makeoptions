@@ -17,7 +17,8 @@ help::
 	@printf "\n" >&2
 
 ifneq ($(debugging),no)
-override CFLAGS += -O0 -g
+override CFLAGS += -O0 -g -DDEBUGGING
+override BPFCFLAGS += -DDEBUGGING
 endif
 
 ifneq ($(coverage),no)

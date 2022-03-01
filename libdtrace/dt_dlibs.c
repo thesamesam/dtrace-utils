@@ -72,6 +72,9 @@ static const dt_ident_t		dt_bpf_symbols[] = {
 	DT_BPF_SYMBOL(dt_speculation_speculate, DT_IDENT_SYMBOL),
 	DT_BPF_SYMBOL(dt_speculation_set_drainable, DT_IDENT_SYMBOL),
 	DT_BPF_SYMBOL(dt_strnlen, DT_IDENT_SYMBOL),
+#ifdef DEBUGGING
+	DT_BPF_SYMBOL(dt_trace_ptr, DT_IDENT_SYMBOL),
+#endif
 	/* BPF maps */
 	DT_BPF_SYMBOL(aggs, DT_IDENT_PTR),
 	DT_BPF_SYMBOL(buffers, DT_IDENT_PTR),

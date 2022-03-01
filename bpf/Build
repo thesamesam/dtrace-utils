@@ -38,7 +38,8 @@ bpf_dlib_SOURCES = \
 	strlen.c \
 	strrchr.S \
 	strtok.S \
-	substr.S
+	substr.S \
+	trace_ptr.c
 
 bpf-check: $(objdir)/include/.dir.stamp
 	$(BPFC) $(BPFCPPFLAGS) $(bpf_dlib_CPPFLAGS) $(BPFCFLAGS) -S \

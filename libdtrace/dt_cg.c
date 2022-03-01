@@ -25,6 +25,9 @@
 #include <bpf_asm.h>
 
 static void dt_cg_node(dt_node_t *, dt_irlist_t *, dt_regset_t *);
+static void _dt_unused_
+dt_cg_trace(dt_irlist_t *dlp _dt_unused_, dt_regset_t *drp _dt_unused_,
+	    int isreg _dt_unused_, int counter _dt_unused_, uint64_t val _dt_unused_);
 
 /*
  * Generate the generic prologue of the trampoline BPF program.
@@ -737,6 +740,33 @@ dt_cg_fill_gap(dt_pcb_t *pcb, int gap)
 	}
 	if (gap & 4)
 		emit(dlp, BPF_STORE_IMM(BPF_W, BPF_REG_9, off, 0));
+}
+
+/*
+ * Trace an immediate counter and a value to the log at
+ * /sys/kernel/debug/tracing/trace_pipe.  If ISREG, VAL is a register number:
+ * otherwise, it's an immediate value.
+ */
+static void _dt_unused_
+dt_cg_trace(dt_irlist_t *dlp _dt_unused_, dt_regset_t *drp _dt_unused_,
+	    int isreg _dt_unused_, int counter _dt_unused_, uint64_t val _dt_unused_)
+{
+#ifdef DEBUGGING
+	dt_ident_t	*idp = dt_dlib_get_func(yypcb->pcb_hdl, "dt_trace_ptr");
+
+	if (dt_regset_xalloc_args(drp) == -1)
+		longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+	dt_regset_xalloc(drp, BPF_REG_0);
+	emit(dlp,  BPF_MOV_IMM(BPF_REG_1, counter));
+	if (isreg)
+		emit(dlp,  BPF_MOV_REG(BPF_REG_2, val));
+	else
+		emit(dlp,  BPF_MOV_IMM(BPF_REG_2, val));
+
+	emite(dlp, BPF_CALL_FUNC(idp->di_id), idp);
+	dt_regset_free(drp, BPF_REG_0);
+	dt_regset_free_args(drp);
+#endif
 }
 
 static void
