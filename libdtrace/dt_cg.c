@@ -2234,6 +2234,131 @@ dt_cg_check_scratch_bounds(dt_irlist_t *dlp, dt_regset_t *drp, int reg, int size
 	dt_regset_free(drp, scratchbot);
 }
 
+/*
+ * Like dt_cg_check_scratch_bounds, except checking that REG is entirely
+ * outside scratch space.  The REG is scalarized in the course of processing, so
+ * will quite possibly end up with much more extreme bounds than it started
+ * with.  If this is a problem, work from a temp copy.
+ */
+static void
+dt_cg_check_outscratch_bounds(dt_irlist_t *dlp, dt_regset_t *drp, int reg,
+			      ssize_t size, int sizemax)
+{
+	int	opt_scratchsize = yypcb->pcb_hdl->dt_options[DTRACEOPT_SCRATCHSIZE];
+	uint_t	lbl_err = dt_irlist_label(dlp);
+	uint_t	lbl_size_err = dt_irlist_label(dlp);
+	uint_t	lbl_above = dt_irlist_label(dlp);
+	uint_t	lbl_ok = dt_irlist_label(dlp);
+	int	scratchlen, scratchbot, mst, origreg;
+
+	/*
+	 * Size checks first.  If SIZEMAX is set, make sure SIZE is no bigger
+	 * than it.  In any case, make sure it's smaller than the scratch len.
+	 */
+	if ((scratchlen = dt_regset_alloc(drp)) == -1)
+		longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+
+	emit(dlp,  BPF_LOAD(BPF_DW, scratchlen, BPF_REG_FP, DT_STK_DCTX));
+	emit(dlp,  BPF_LOAD(BPF_DW, scratchlen, scratchlen, DCTX_MST));
+	emit(dlp,  BPF_LOAD(BPF_DW, scratchlen, scratchlen,
+			    DMST_SCRATCH_TOP));
+	emit(dlp,  BPF_ALU64_IMM(BPF_AND, scratchlen, clp2(opt_scratchsize + 1) - 1));
+
+	if (sizemax < 0)
+		emit(dlp,  BPF_BRANCH_REG(BPF_JSLT, scratchlen, size, lbl_size_err));
+	else {
+		emit(dlp,  BPF_BRANCH_IMM(BPF_JGT, size, sizemax, lbl_size_err));
+		emit(dlp,  BPF_BRANCH_REG(BPF_JGT, size, scratchlen, lbl_size_err));
+	}
+
+	dt_regset_free(drp, scratchlen);
+
+	/*
+	 * Now all the address checks.
+	 */
+
+	if ((scratchbot = dt_regset_alloc(drp)) == -1 ||
+	    (origreg = dt_regset_alloc(drp)) == -1 ||
+	    (mst = dt_regset_alloc(drp)) == -1)
+		longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+
+	emit(dlp,  BPF_LOAD(BPF_DW, mst, BPF_REG_FP, DT_STK_DCTX));
+	emit(dlp,  BPF_LOAD(BPF_DW, mst, mst, DCTX_MST));
+
+	emit(dlp,  BPF_LOAD(BPF_DW, scratchbot, BPF_REG_FP, DT_STK_DCTX));
+	emit(dlp,  BPF_LOAD(BPF_DW, scratchbot, scratchbot, DCTX_SCRATCHMEM));
+
+	/*
+	 * Scalarize the scratchbot and reg so we can do subtractions on them
+	 * and treat the result as an integer, even if they derive from
+	 * different maps.  Keep track of the original reg so we can use
+	 * it in error messages even if we've done terrible things to the
+	 * reg itself.
+	 */
+
+	emit(dlp,  BPF_STORE(BPF_DW, mst, DMST_SCALARIZER, scratchbot));
+	emit(dlp,  BPF_LOAD(BPF_DW, scratchbot, mst, DMST_SCALARIZER));
+	emit(dlp,  BPF_STORE(BPF_DW, mst, DMST_SCALARIZER, reg));
+	emit(dlp,  BPF_LOAD(BPF_DW, reg, mst, DMST_SCALARIZER));
+	emit(dlp,  BPF_MOV_REG(origreg, reg));
+
+	dt_regset_free(drp, mst);
+
+	/*
+	 * Check for below/above scratch space by reduction to offsets and
+	 * comparision, to allow the verifier to bounds-check.
+	 *
+	 * We only really need to check below: if we're above, we already
+	 * checked almost everything we need to.  Check the below side by
+	 * subtraction and > 0 comparison.
+	 */
+	emit(dlp,  BPF_ALU64_REG(BPF_SUB, reg, scratchbot));
+	emit(dlp,  BPF_BRANCH_IMM(BPF_JSGE, reg, 0, lbl_above));
+
+	if (sizemax < 0) {
+		emit(dlp,  BPF_ALU64_IMM(BPF_ADD, reg, size));
+		emit(dlp,  BPF_BRANCH_IMM(BPF_JSGE, reg, 0, lbl_err));
+		emit(dlp,  BPF_ALU64_IMM(BPF_SUB, reg, size));
+	} else {
+		/*
+		 * Ignore SIZEMAX because the verifier doesn't care about inner
+		 * bounds anyway: runtime checks are enough.
+		 */
+		emit(dlp,  BPF_ALU64_REG(BPF_ADD, reg, size));
+		emit(dlp,  BPF_BRANCH_IMM(BPF_JSGE, reg, 0, lbl_err));
+		emit(dlp,  BPF_ALU64_REG(BPF_SUB, reg, size));
+	}
+	emit(dlp,  BPF_JUMP(lbl_ok));
+
+	/*
+	 * For above, we just need to make sure the reg is above
+	 * scratchbot + size.
+	 */
+	if (sizemax < 0)
+		emitl(dlp, lbl_above,
+		      BPF_ALU64_IMM(BPF_SUB, reg, size));
+	else
+		emitl(dlp, lbl_above,
+		      BPF_ALU64_REG(BPF_SUB, reg, size));
+
+	emit(dlp,  BPF_BRANCH_IMM(BPF_JSLE, reg, 0, lbl_err));
+	emit(dlp,  BPF_JUMP(lbl_ok));
+
+	dt_cg_probe_error_regval(yypcb, lbl_err, -1, DTRACEFLT_BADADDR, origreg);
+	if (sizemax < 0)
+		dt_cg_probe_error(yypcb, lbl_size_err, -1, DTRACEFLT_BADSIZE, size);
+	else
+		dt_cg_probe_error_regval(yypcb, lbl_size_err, -1, DTRACEFLT_BADSIZE,
+					 size);
+	emitl(dlp, lbl_ok,
+		   BPF_ALU64_REG(BPF_ADD, reg, scratchbot));
+
+	dt_regset_free(drp, scratchbot);
+	dt_regset_free(drp, origreg);
+
+	dt_cg_check_fault(yypcb);
+}
+
 /* Handle loading a pointer to alloca'ed space.  */
 
 static void
@@ -4050,6 +4175,60 @@ dt_cg_subr_alloca(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp)
 }
 
 static void
+dt_cg_subr_bcopy(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp)
+{
+	int	opt_scratchsize = yypcb->pcb_hdl->dt_options[DTRACEOPT_SCRATCHSIZE];
+
+	dt_node_t	*src = dnp->dn_args;
+	dt_node_t	*dest = src->dn_list;
+	dt_node_t	*size = dest->dn_list;
+	uint_t		lbl_ok = dt_irlist_label(dlp);
+
+	TRACE_REGSET("    subr-bcopy:Begin");
+
+	dt_cg_node(src, dlp, drp);
+	dt_cg_check_notnull(dlp, drp, src->dn_reg);
+	dt_cg_node(dest, dlp, drp);
+	dt_cg_check_notnull(dlp, drp, dest->dn_reg);
+	dt_cg_node(size, dlp, drp);
+
+	dt_cg_check_outscratch_bounds(dlp, drp, src->dn_reg, size->dn_reg,
+				      opt_scratchsize);
+	dt_cg_check_scratch_bounds(dlp, drp, dest->dn_reg, size->dn_reg,
+				   opt_scratchsize);
+
+	dt_regset_xalloc(drp, BPF_REG_0);
+
+	if (dt_regset_xalloc_args(drp) == -1)
+		longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+
+	emit(dlp, BPF_MOV_REG(BPF_REG_1, dest->dn_reg));
+	emit(dlp, BPF_MOV_REG(BPF_REG_2, size->dn_reg));
+	emit(dlp, BPF_MOV_REG(BPF_REG_3, src->dn_reg));
+	emit(dlp, BPF_CALL_HELPER(BPF_FUNC_probe_read));
+
+	/*
+	 * At this point the dest is validated, so any problem must be with
+	 * the src address.
+	 */
+	dt_regset_free_args(drp);
+	emit(dlp,  BPF_BRANCH_IMM(BPF_JEQ, BPF_REG_0, 0, lbl_ok));
+	dt_cg_probe_error_regval(yypcb, DT_LBL_NONE, -1,
+				 DTRACEFLT_BADADDR,
+				 src->dn_reg);
+	emitl(dlp, lbl_ok,
+	      BPF_NOP());
+
+	dt_regset_free(drp, BPF_REG_0);
+
+	dt_regset_free(drp, src->dn_reg);
+	dt_regset_free(drp, dest->dn_reg);
+	dt_regset_free(drp, size->dn_reg);
+
+	TRACE_REGSET("    subr-bcopy:End  ");
+}
+
+static void
 dt_cg_subr_strchr(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp)
 {
 	dt_ident_t	*idp;
@@ -4520,7 +4699,7 @@ static dt_cg_subr_f *_dt_cg_subr[DIF_SUBR_MAX + 1] = {
 	[DIF_SUBR_COPYOUT]		= NULL,
 	[DIF_SUBR_COPYOUTSTR]		= NULL,
 	[DIF_SUBR_ALLOCA]		= &dt_cg_subr_alloca,
-	[DIF_SUBR_BCOPY]		= NULL,
+	[DIF_SUBR_BCOPY]		= &dt_cg_subr_bcopy,
 	[DIF_SUBR_COPYINTO]		= NULL,
 	[DIF_SUBR_MSGDSIZE]		= NULL,
 	[DIF_SUBR_MSGSIZE]		= NULL,

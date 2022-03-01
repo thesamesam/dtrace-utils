@@ -25,6 +25,7 @@ typedef struct dt_mstate {
 	uint32_t	scratch_top;	/* Current top of scratch space */
 	uint32_t	scratch_next;	/* Next scratch space allocation */
 	int32_t		syscall_errno;	/* syscall errno */
+	uint64_t	scalarizer;	/* used to scalarize pointers */
 	uint64_t	fault;		/* DTrace fault flags */
 	uint64_t	tstamp;		/* cached timestamp value */
 	dt_pt_regs	regs;		/* CPU registers */
@@ -80,6 +81,7 @@ typedef struct dt_dctx {
 #define DMST_SCRATCH_TOP	offsetof(dt_mstate_t, scratch_top)
 #define DMST_SCRATCH_NEXT	offsetof(dt_mstate_t, scratch_next)
 #define DMST_ERRNO		offsetof(dt_mstate_t, syscall_errno)
+#define DMST_SCALARIZER		offsetof(dt_mstate_t, scalarizer)
 #define DMST_FAULT		offsetof(dt_mstate_t, fault)
 #define DMST_TSTAMP		offsetof(dt_mstate_t, tstamp)
 #define DMST_REGS		offsetof(dt_mstate_t, regs)
