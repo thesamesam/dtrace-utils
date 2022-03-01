@@ -644,14 +644,17 @@ dt_cg_epilogue(dt_pcb_t *pcb)
 }
 
 /*
- * Generate code for a fault condition.  A call is made to dt_probe_error() to
- * set the fault information.
+ * Generate code for a fault condition, possibly at a given label.  A call is
+ * made to dt_probe_error() to set the fault information.
+ *
+ * Doesn't use the regset code on the grounds that when this is executed we will
+ * never reuse any of the callers' regs in any case.
  */
 static void
-dt_cg_probe_error(dt_pcb_t *pcb, uint32_t off, uint32_t fault, uint64_t illval)
+dt_cg_probe_error(dt_pcb_t *pcb, int lbl, uint32_t off, uint32_t fault,
+    uint64_t illval)
 {
 	dt_irlist_t	*dlp = &pcb->pcb_ir;
-	dt_regset_t	*drp = pcb->pcb_regs;
 	dt_ident_t	*idp = dt_dlib_get_func(yypcb->pcb_hdl,
 						"dt_probe_error");
 
@@ -666,16 +669,58 @@ dt_cg_probe_error(dt_pcb_t *pcb, uint32_t off, uint32_t fault, uint64_t illval)
 	 *				// call dt_probe_error
 	 *	return;			// exit
 	 */
-	if (dt_regset_xalloc_args(drp) == -1)
-		longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
-	emit(dlp,  BPF_LOAD(BPF_DW, BPF_REG_1, BPF_REG_FP, DT_STK_DCTX));
+
+	emitl(dlp, lbl,
+		   BPF_LOAD(BPF_DW, BPF_REG_1, BPF_REG_FP, DT_STK_DCTX));
 	emit(dlp,  BPF_MOV_IMM(BPF_REG_2, off));
 	emit(dlp,  BPF_MOV_IMM(BPF_REG_3, fault));
 	emit(dlp,  BPF_MOV_IMM(BPF_REG_4, illval));
-	dt_regset_xalloc(drp, BPF_REG_0);
 	emite(dlp, BPF_CALL_FUNC(idp->di_id), idp);
-	dt_regset_free_args(drp);
-	dt_regset_free(drp, BPF_REG_0);
+	emit(dlp,  BPF_RETURN());
+}
+
+/*
+ * Generate code for a fault condition with the illval coming from a register.
+ * Drop a label at the start.
+ *
+ * Doesn't use the regset code on the grounds that when this is executed we will
+ * only reuse one caller's reg in a stereotyped manner.
+ */
+static void
+dt_cg_probe_error_regval(dt_pcb_t *pcb, int lbl, uint32_t off,
+			 uint32_t fault, int illreg)
+{
+	dt_irlist_t	*dlp = &pcb->pcb_ir;
+	dt_ident_t	*idp = dt_dlib_get_func(yypcb->pcb_hdl,
+						"dt_probe_error");
+
+	assert(idp != NULL);
+
+	/*
+	 *	dt_probe_error(
+	 *		dctx,		// lddw %r1, %fp, DT_STK_DCTX
+	 *		off,		// mov %r2, off
+	 *		fault,		// mov %r3, fault
+	 *		illreg);	// mov %r4, %illreg
+	 *				// call dt_probe_error
+	 *	return;			// exit
+	 */
+
+	/*
+	 * Move the only pre-existing reg we need (illreg) into place first,
+	 * since we don't know which reg it is and it might perfectly well be
+	 * one we are about to blindly reuse.
+	 */
+
+	if (illreg != 4) {
+		emitl(dlp, lbl, BPF_MOV_REG(BPF_REG_4, illreg));
+		lbl = DT_LBL_NONE;
+	}
+	emitl(dlp, lbl,
+		   BPF_LOAD(BPF_DW, BPF_REG_1, BPF_REG_FP, DT_STK_DCTX));
+	emit(dlp,  BPF_MOV_IMM(BPF_REG_2, off));
+	emit(dlp,  BPF_MOV_IMM(BPF_REG_3, fault));
+	emite(dlp, BPF_CALL_FUNC(idp->di_id), idp);
 	emit(dlp,  BPF_RETURN());
 }
 
@@ -689,7 +734,7 @@ dt_cg_check_notnull(dt_irlist_t *dlp, dt_regset_t *drp, int reg)
 	uint_t	lbl_notnull = dt_irlist_label(dlp);
 
 	emit(dlp,  BPF_BRANCH_IMM(BPF_JNE, reg, 0, lbl_notnull));
-	dt_cg_probe_error(yypcb, -1, DTRACEFLT_BADADDR, 0);
+	dt_cg_probe_error(yypcb, DT_LBL_NONE, -1, DTRACEFLT_BADADDR, 0);
 	emitl(dlp, lbl_notnull,
 		   BPF_NOP());
 }
@@ -1677,7 +1722,7 @@ dt_cg_act_stack(dt_pcb_t *pcb, dt_node_t *dnp, dtrace_actkind_t kind)
 	dt_regset_free_args(drp);
 	emit(dlp,  BPF_BRANCH_IMM(BPF_JSGE, BPF_REG_0, 0, lbl_valid));
 	dt_regset_free(drp, BPF_REG_0);
-	dt_cg_probe_error(pcb, -1, DTRACEFLT_BADSTACK, 0);
+	dt_cg_probe_error(pcb, DT_LBL_NONE, -1, DTRACEFLT_BADSTACK, 0);
 	emitl(dlp, lbl_valid,
 		   BPF_NOP());
 }
@@ -1847,7 +1892,7 @@ dt_cg_act_ustack(dt_pcb_t *pcb, dt_node_t *dnp, dtrace_actkind_t kind)
 	dt_regset_free_args(drp);
 	emit(dlp,  BPF_BRANCH_IMM(BPF_JSGE, BPF_REG_0, 0, lbl_valid));
 	dt_regset_free(drp, BPF_REG_0);
-	dt_cg_probe_error(pcb, -1, DTRACEFLT_BADSTACK, 0);
+	dt_cg_probe_error(pcb, DT_LBL_NONE, -1, DTRACEFLT_BADSTACK, 0);
 	emitl(dlp, lbl_valid,
 		   BPF_NOP());
 }
@@ -2612,7 +2657,7 @@ dt_cg_arithmetic_op(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp,
 		/* First ensure we do not perform a division by zero. */
 		emit(dlp,  BPF_BRANCH_IMM(BPF_JNE, dnp->dn_right->dn_reg, 0,
 					  lbl_valid));
-		dt_cg_probe_error(yypcb, -1, DTRACEFLT_DIVZERO, 0);
+		dt_cg_probe_error(yypcb, DT_LBL_NONE, -1, DTRACEFLT_DIVZERO, 0);
 		emitl(dlp, lbl_valid,
 			   BPF_NOP());
 
