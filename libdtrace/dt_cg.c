@@ -30,6 +30,12 @@ dt_cg_trace(dt_irlist_t *dlp _dt_unused_, dt_regset_t *drp _dt_unused_,
 	    int isreg _dt_unused_, int counter _dt_unused_, uint64_t val _dt_unused_);
 
 /*
+ * The value stored in an alloca'ed variable if what was stored is literal
+ * NULL.
+ */
+#define DT_CG_ALLOCA_NULLPTR ~(1<<30)
+
+/*
  * Generate the generic prologue of the trampoline BPF program.
  *
  * The trampoline BPF program is attached to a kernel probe event and it is
@@ -199,6 +205,7 @@ dt_cg_tramp_prologue_act(dt_pcb_t *pcb, dt_activity_t act)
 
 	DT_CG_STORE_MAP_PTR("strtab", DCTX_STRTAB);
 	DT_CG_STORE_MAP_PTR("scratchmem", DCTX_SCRATCHMEM);
+	DT_CG_STORE_MAP_PTR("null", DCTX_NULL);
 	if (dt_idhash_datasize(dtp->dt_aggs) > 0)
 		DT_CG_STORE_MAP_PTR("aggs", DCTX_AGG);
 	if (dt_idhash_datasize(dtp->dt_globals) > 0)
@@ -2262,17 +2269,23 @@ dt_cg_check_scratch_bounds(dt_irlist_t *dlp, dt_regset_t *drp, int reg, int size
  * outside scratch space.  The REG is scalarized in the course of processing, so
  * will quite possibly end up with much more extreme bounds than it started
  * with.  If this is a problem, work from a temp copy.
+ *
+ * Null pointers are considered to be invalid even though they are technically
+ * outside the bounds.
  */
 static void
 dt_cg_check_outscratch_bounds(dt_irlist_t *dlp, dt_regset_t *drp, int reg,
 			      ssize_t size, int sizemax)
 {
 	int	opt_scratchsize = yypcb->pcb_hdl->dt_options[DTRACEOPT_SCRATCHSIZE];
+	uint_t	lbl_nonzero = dt_irlist_label(dlp);
+	uint_t	lbl_nonnull = dt_irlist_label(dlp);
+	uint_t	lbl_null = dt_irlist_label(dlp);
 	uint_t	lbl_err = dt_irlist_label(dlp);
 	uint_t	lbl_size_err = dt_irlist_label(dlp);
 	uint_t	lbl_above = dt_irlist_label(dlp);
 	uint_t	lbl_ok = dt_irlist_label(dlp);
-	int	scratchlen, scratchbot, mst, origreg;
+	int	scratchlen, scratchbot, mst, origreg, null, tmp;
 
 	/*
 	 * Size checks first.  If SIZEMAX is set, make sure SIZE is no bigger
@@ -2325,6 +2338,43 @@ dt_cg_check_outscratch_bounds(dt_irlist_t *dlp, dt_regset_t *drp, int reg,
 	emit(dlp,  BPF_LOAD(BPF_DW, reg, mst, DMST_SCALARIZER));
 	emit(dlp,  BPF_MOV_REG(origreg, reg));
 
+	/*
+	 * Null pointers are always out of bounds.  So is everything within
+	 * scratchlen of a null pointer.  Null pointers can have two
+	 * representations: a straight 0-as-a-pointer (for things not stored in
+	 * variables) or a pointer to the "null pointer space" (for things read
+	 * from variables).  We must check for both.
+	 */
+
+	if ((null = dt_regset_alloc(drp)) == -1 ||
+	    (tmp = dt_regset_alloc(drp)) == -1)
+		longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+
+	emit(dlp,  BPF_BRANCH_IMM(BPF_JSGT, reg, clp2(opt_scratchsize + 1) - 1,
+				  lbl_nonzero));
+	emit(dlp,  BPF_BRANCH_IMM(BPF_JSLT, reg, -clp2(opt_scratchsize + 1) - 1,
+				  lbl_nonzero));
+
+	emit(dlp,  BPF_JUMP(lbl_null));
+
+	emitl(dlp, lbl_nonzero,
+	      BPF_LOAD(BPF_DW, null, BPF_REG_FP, DT_STK_DCTX));
+	emit(dlp,  BPF_LOAD(BPF_DW, null, null, DCTX_NULL));
+	emit(dlp,  BPF_STORE(BPF_DW, mst, DMST_SCALARIZER, null));
+	emit(dlp,  BPF_LOAD(BPF_DW, null, mst, DMST_SCALARIZER));
+
+	emit(dlp,  BPF_MOV_REG(tmp, reg));
+	emit(dlp,  BPF_ALU64_REG(BPF_SUB, tmp, null));
+	emit(dlp,  BPF_BRANCH_IMM(BPF_JSGT, tmp, clp2(opt_scratchsize + 1) - 1,
+				  lbl_nonnull));
+	emit(dlp,  BPF_BRANCH_IMM(BPF_JSLT, tmp, -clp2(opt_scratchsize + 1) - 1,
+				  lbl_nonnull));
+	dt_cg_probe_error(yypcb, lbl_null, -1, DTRACEFLT_BADADDR, 0);
+
+	emitl(dlp, lbl_nonnull,
+		   BPF_NOP());
+	dt_regset_free(drp, null);
+	dt_regset_free(drp, tmp);
 	dt_regset_free(drp, mst);
 
 	/*
@@ -2400,6 +2450,21 @@ dt_cg_load_alloca(dt_node_t *dst, dt_irlist_t *dlp, dt_regset_t *drp,
 	if ((idp->di_flags & DT_IDFLG_ALLOCA) && (dst->dn_flags & DT_NF_ALLOCA)) {
 		int	opt_scratchsize = yypcb->pcb_hdl->dt_options[DTRACEOPT_SCRATCHSIZE];
 		int	scratchbot, scratchlen;
+		uint_t	lbl_nonnull = dt_irlist_label(dlp);
+		uint_t	lbl_done = dt_irlist_label(dlp);
+
+		/*
+		 * First, check for a null pointer and turn it into a pointer to
+		 * the null pointer space, which the verifier at least considers
+		 * to be a pointer.
+		 */
+		emit(dlp,  BPF_BRANCH_IMM(BPF_JNE, dst->dn_reg,
+					  DT_CG_ALLOCA_NULLPTR, lbl_nonnull));
+		emit(dlp,  BPF_LOAD(BPF_DW, dst->dn_reg, BPF_REG_FP, DT_STK_DCTX));
+		emit(dlp,  BPF_LOAD(BPF_DW, dst->dn_reg, dst->dn_reg, DCTX_NULL));
+		emit(dlp,  BPF_JUMP(lbl_done));
+
+		emitl(dlp, lbl_nonnull, BPF_NOP());
 
 		/*
 		 * Get the scratch length and check it.
@@ -2434,6 +2499,8 @@ dt_cg_load_alloca(dt_node_t *dst, dt_irlist_t *dlp, dt_regset_t *drp,
 
 		dt_regset_free(drp, scratchbot);
 		dt_regset_free(drp, scratchlen);
+
+		emitl(dlp, lbl_done, BPF_NOP());
 	}
 }
 

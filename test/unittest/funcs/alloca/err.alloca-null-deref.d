@@ -6,9 +6,7 @@
  */
 
 /*
- * ASSERTION: the same variable cannot be reused for alloca and
- *            non-alloca pointers, even in different clauses.
- *            You can't fake it out by assigning NULL in between.
+ * ASSERTION: You can't dereference a nullified alloca pointer.
  *
  * SECTION: Actions and Subroutines/alloca()
  */
@@ -17,14 +15,13 @@
 
 BEGIN
 {
-	a = (char *) alloca(1);
+	s = (char *) alloca(10);
+	s = NULL;
+        *s = 4;
+	exit(0);
 }
 
-BEGIN
+ERROR
 {
-	b = (char *) &`max_pfn;
-        a = NULL;
-        a = b + 5;
-	trace(a);
-	exit(0);
+	exit(1);
 }

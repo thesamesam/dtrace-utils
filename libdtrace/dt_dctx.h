@@ -42,6 +42,7 @@ typedef struct dt_dctx {
 	char		*buf;		/* Output buffer scratch memory */
 	char		*mem;		/* General scratch memory */
 	char		*scratchmem;	/* Scratch space for alloca, etc */
+	char		*null;		/* "Null pointer space". */
 	char		*strtab;	/* String constant table */
 	char		*agg;		/* Aggregation data */
 	char		*gvars;		/* Global variables */
@@ -54,6 +55,7 @@ typedef struct dt_dctx {
 #define DCTX_BUF	offsetof(dt_dctx_t, buf)
 #define DCTX_MEM	offsetof(dt_dctx_t, mem)
 #define DCTX_SCRATCHMEM	offsetof(dt_dctx_t, scratchmem)
+#define DCTX_NULL	offsetof(dt_dctx_t, null)
 #define DCTX_STRTAB	offsetof(dt_dctx_t, strtab)
 #define DCTX_AGG	offsetof(dt_dctx_t, agg)
 #define DCTX_GVARS	offsetof(dt_dctx_t, gvars)

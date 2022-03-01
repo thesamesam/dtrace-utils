@@ -3820,9 +3820,14 @@ asgn_common:
 		if (lp->dn_kind == DT_NODE_VAR)
 			lp_idp = lp->dn_ident;
 
+		/*
+		 * Transfer alloca taint.  Stores of non-alloca, non-literal-0
+		 * values turn on DT_IDFLG_NONALLOCA to prevent this identifier
+		 * from being used for alloca storage anywhere in the program.
+		 */
 		if (rp->dn_flags & DT_NF_ALLOCA)
 			dt_cook_taint_alloca(lp, lp_idp, rp);
-		else if (lp_idp)
+		else if (lp_idp && !(rp->dn_kind == DT_NODE_INT && rp->dn_value == 0))
 			lp_idp->di_flags |= DT_IDFLG_NONALLOCA;
 
 		dt_node_type_propagate(lp, dnp); /* see K&R[A7.17] */
@@ -4064,9 +4069,14 @@ asgn_common:
 		dnp->dn_args = rp;
 		dnp->dn_list = NULL;
 
+		/*
+		 * Transfer alloca taint.  Stores of non-alloca, non-literal-0
+		 * values turn on DT_IDFLG_NONALLOCA to prevent this identifier
+		 * from being used for alloca storage anywhere in the program.
+		 */
 		if (dnp->dn_args->dn_flags & DT_NF_ALLOCA)
 			dt_cook_taint_alloca(dnp, idp, dnp->dn_args);
-		else
+		else if (dnp->dn_kind != DT_NODE_INT || dnp->dn_value != 0)
 			idp->di_flags |= DT_IDFLG_NONALLOCA;
 
 		dt_node_free(lp);

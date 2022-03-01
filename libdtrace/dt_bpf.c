@@ -331,6 +331,16 @@ dt_bpf_gmap_create(dtrace_hdl_t *dtp)
 		return -1;		/* dt_errno is set for us */
 
 	/*
+	 * This weird hack is a pointer for null pointers to point to.  This
+	 * lets us do arithmetic on them without verifier failures, while
+	 * still allowing us to detect null pointers unambiguously.
+	 */
+	if (create_gmap(dtp, "null", BPF_MAP_TYPE_ARRAY,
+			sizeof(uint32_t),
+			1, 1) == -1)
+		return -1;		/* dt_errno is set for us */
+
+	/*
 	 * We need to create the global (consolidated) string table.  We store
 	 * the actual length (for in-code BPF validation purposes) but augment
 	 * it by the maximum string storage size to determine the size of the
