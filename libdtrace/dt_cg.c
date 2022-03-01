@@ -2104,6 +2104,153 @@ dt_cg_load(dt_node_t *dnp, ctf_file_t *ctfp, ctf_id_t type)
 #endif
 }
 
+/*
+ * For an alloca'ed allocation, verify that a read/write op on REG of size SIZE
+ * will not exceed the bounds given by 0..LENREG; LENREG must not exceed LENMAX
+ * (a cg-time constant value).  If REGPTR is nonzero, REG is a pointer, and is
+ * reduced by BASEREG before comparison with LENREG.  On return, REG is
+ * bounds-checked, and converted to a pointer if it was not already one (by
+ * addition of BASEREG).  If SIZEMAX is >-1, SIZE is a register, with a
+ * max allowed value given by SIZEMAX.
+ *
+ * If BASEREG is -1, it is replaced with an immediate zero value (so you can use
+ * this to check if REG is between 0...LENREG without turning REG into a pointer
+ * at all).
+ */
+static void
+dt_cg_check_bounds(dt_irlist_t *dlp, dt_regset_t *drp, int regptr, int basereg,
+		   int reg, int size, int lenreg, int sizemax, int lenmax)
+{
+	uint_t	lbl_ok = dt_irlist_label(dlp);
+	uint_t	lbl_size_err = dt_irlist_label(dlp);
+	uint_t	lbl_err = dt_irlist_label(dlp);
+	uint_t	lbl_interr = dt_irlist_label(dlp);
+
+	if (sizemax < 0)
+		emit(dlp,  BPF_BRANCH_IMM(BPF_JLT, lenreg, size, lbl_err));
+	else {
+		emit(dlp,  BPF_BRANCH_REG(BPF_JLT, lenreg, size, lbl_err));
+	}
+
+	/*
+	 * Check for below/above scratch space by reduction to offsets and
+	 * comparision, to allow the verifier to bounds-check.  Satisfy
+	 * the verifier after reduction via masking.
+	 */
+
+	if (regptr && basereg > -1) {
+		emit(dlp,  BPF_BRANCH_REG(BPF_JLT, reg, basereg, lbl_err));
+		emit(dlp, BPF_ALU64_REG(BPF_SUB, reg, basereg));
+	}
+
+	emit(dlp,  BPF_BRANCH_IMM(BPF_JSLT, reg, 0, lbl_err));
+	emit(dlp,  BPF_BRANCH_IMM(BPF_JGE, reg, lenmax, lbl_err));
+	emit(dlp,  BPF_ALU64_IMM(BPF_AND, reg, clp2(lenmax) - 1));
+
+	/*
+	 * Satisfy the verifier, which adjusts bounds only when compared with an
+	 * immediate value or an equality check.  The check is against SIZEMAX,
+	 * which is the actual size of scratch space (including a max-size
+	 * buffer at the end specifically to allow dynamically-sized writes to
+	 * succeed without exceeding the bound).  This will never fail at
+	 * runtime.
+	 */
+
+	if (sizemax < 0)
+		emit(dlp,  BPF_ALU64_IMM(BPF_ADD, reg, sizeof(uint64_t)));
+	else
+		emit(dlp,  BPF_ALU64_IMM(BPF_ADD, reg, sizemax));
+	emit(dlp,  BPF_BRANCH_IMM(BPF_JGE, reg, lenmax, lbl_interr));
+
+	if (sizemax < 0)
+		emit(dlp,  BPF_ALU64_IMM(BPF_SUB, reg, sizeof(uint64_t)));
+	else
+		emit(dlp,  BPF_ALU64_IMM(BPF_SUB, reg, sizemax));
+
+	/*
+	 * Now do a (runtime) check of the actual read/write.
+	 */
+
+	if (sizemax < 0)
+		emit(dlp,  BPF_ALU64_IMM(BPF_ADD, reg, size));
+	else
+		emit(dlp,  BPF_ALU64_REG(BPF_ADD, reg, size));
+	emit(dlp,  BPF_BRANCH_REG(BPF_JGT, reg, lenreg, lbl_size_err));
+	emit(dlp,  BPF_JUMP(lbl_ok));
+	dt_cg_probe_error_regval(yypcb, lbl_err, -1, DTRACEFLT_BADADDR, reg);
+	if (sizemax < 0)
+		dt_cg_probe_error(yypcb, lbl_size_err, -1, DTRACEFLT_BADSIZE, size);
+	else
+		dt_cg_probe_error_regval(yypcb, lbl_size_err, -1, DTRACEFLT_BADSIZE,
+					 size);
+	dt_cg_probe_error_regval(yypcb, lbl_interr, -1, DTRACEFLT_INTERR, 0);
+
+	if (sizemax < 0)
+		emitl(dlp, lbl_ok, BPF_ALU64_IMM(BPF_SUB, reg, size));
+	else
+		emitl(dlp, lbl_ok, BPF_ALU64_REG(BPF_SUB, reg, size));
+
+	if (basereg > -1)
+		emit(dlp,  BPF_ALU64_REG(BPF_ADD, reg, basereg));
+
+	dt_cg_check_fault(yypcb);
+}
+
+/* Handle loading a pointer to alloca'ed space.  */
+
+static void
+dt_cg_load_alloca(dt_node_t *dst, dt_irlist_t *dlp, dt_regset_t *drp,
+    dt_ident_t *idp)
+{
+	/*
+	 * Loads from identifiers with DT_IDFLG_ALLOCA set and DT_NF_ALLOCA set
+	 * on the target load DCTX_SCRATCHMEM + the value in the map, converting
+	 * the scratchmem-relative offset back into a properly-bounded pointer;
+	 * the value is bounds-checked before addition and bounded by the
+	 * expected access size.  The pointer is checked again when
+	 * dereferenced, because it is perfectly possible for users to add or
+	 * subtract from it, taking it out of bounds again.
+	 */
+	if ((idp->di_flags & DT_IDFLG_ALLOCA) && (dst->dn_flags & DT_NF_ALLOCA)) {
+		int	opt_scratchsize = yypcb->pcb_hdl->dt_options[DTRACEOPT_SCRATCHSIZE];
+		int	scratchbot, scratchlen;
+
+		/*
+		 * Get the scratch length and check it.
+		 */
+		if ((scratchlen = dt_regset_alloc(drp)) == -1)
+			longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+
+		emit(dlp,  BPF_LOAD(BPF_DW, scratchlen, BPF_REG_FP,
+				    DT_STK_DCTX));
+		emit(dlp,  BPF_LOAD(BPF_DW, scratchlen, scratchlen, DCTX_MST));
+		emit(dlp,  BPF_LOAD(BPF_DW, scratchlen, scratchlen,
+				    DMST_SCRATCH_TOP));
+		emit(dlp, BPF_ALU64_IMM(BPF_AND, scratchlen, clp2(opt_scratchsize + 1) - 1));
+
+		dt_cg_check_bounds(dlp, drp, 0, -1, dst->dn_reg, 0, scratchlen,
+				   -1, opt_scratchsize * 2);
+		/*
+		 * Turn the offset into a pointer, mask to bound it (apparently
+		 * necessary because the check above fails to induce bounds in
+		 * the verifier), then re-check bounds afterwards to deal with
+		 * the addition.
+		 */
+		if ((scratchbot = dt_regset_alloc(drp)) == -1)
+			longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+
+		emit(dlp, BPF_ALU64_IMM(BPF_AND, dst->dn_reg, clp2(opt_scratchsize + 1) - 1));
+		emit(dlp, BPF_LOAD(BPF_DW, scratchbot, BPF_REG_FP, DT_STK_DCTX));
+		emit(dlp, BPF_LOAD(BPF_DW, scratchbot, scratchbot, DCTX_SCRATCHMEM));
+		emit(dlp, BPF_ALU64_REG(BPF_ADD, dst->dn_reg, scratchbot));
+		dt_cg_check_bounds(dlp, drp, 1, scratchbot, dst->dn_reg, 0, scratchlen,
+				   -1, opt_scratchsize * 2);
+
+		dt_regset_free(drp, scratchbot);
+		dt_regset_free(drp, scratchlen);
+	}
+}
+
 static void
 dt_cg_load_var(dt_node_t *dst, dt_irlist_t *dlp, dt_regset_t *drp)
 {
@@ -2126,15 +2273,17 @@ dt_cg_load_var(dt_node_t *dst, dt_irlist_t *dlp, dt_regset_t *drp)
 			emit(dlp, BPF_LOAD(BPF_DW, dst->dn_reg, dst->dn_reg, DCTX_GVARS));
 
 		/* load the variable value or address */
-		if (dst->dn_flags & DT_NF_REF)
+		if (dst->dn_flags & DT_NF_REF) {
+			assert(!(dst->dn_flags & DT_NF_ALLOCA));
 			emit(dlp, BPF_ALU64_IMM(BPF_ADD, dst->dn_reg, idp->di_offset));
-		else {
+		} else {
 			size_t	size = dt_node_type_size(dst);
 
 			assert(size > 0 && size <= 8 &&
 			       (size & (size - 1)) == 0);
 
 			emit(dlp, BPF_LOAD(ldstw[size], dst->dn_reg, dst->dn_reg, idp->di_offset));
+			dt_cg_load_alloca(dst, dlp, drp, idp);
 		}
 
 		return;
@@ -2195,6 +2344,8 @@ dt_cg_load_var(dt_node_t *dst, dt_irlist_t *dlp, dt_regset_t *drp)
 	assert(idp != NULL);
 	emite(dlp, BPF_CALL_FUNC(idp->di_id), idp);
 	dt_regset_free_args(drp);
+
+	/* TODO: alloca loads for TLS vars (after rebase above TLS work). */
 
 	dt_cg_check_fault(yypcb);
 
@@ -2426,8 +2577,59 @@ dt_cg_store_var(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp,
 	uint_t	varid, lbl_done;
 	int	reg;
 	size_t	size;
+	int	store_reg = dnp->dn_reg;
 
 	idp->di_flags |= DT_IDFLG_DIFW;
+
+	dt_cg_check_fault(yypcb);
+
+	/*
+	 * Stores of DT_NF_NONALLOCA nodes into identifiers with DT_IDFLG_ALLOCA
+	 * set indicate that an identifier has been reused for both alloca and
+	 * non-alloca purposes.  Block this since it prevents us knowing whether
+	 * to apply an offset at load time.
+	 */
+	if (dnp->dn_flags & DT_NF_ALLOCA && idp->di_flags & DT_IDFLG_NONALLOCA) {
+		xyerror(D_ALLOCA_INCOMPAT, "%s: cannot reuse the "
+			"same identifier for both alloca and "
+			"non-alloca allocations\n",
+			idp->di_name);
+	}
+
+	/*
+	 * Stores of DT_NF_ALLOCA nodes to identifiers with DT_IDFLG_ALLOCA set
+	 * reduce the value stored by the value of DCTX_SCRATCHMEM first,
+	 * turning it into a scratchmem-relative offset.  Literal nulls load in
+	 * an otherwise-invalid value, statically distinguishable from all valid
+	 * ones.
+	 *
+	 * This is all done in a temporary register, to avoid disturbing the
+	 * return value of =.
+	 */
+	if (dnp->dn_flags & DT_NF_ALLOCA && idp->di_flags & DT_IDFLG_ALLOCA) {
+		int scratchbot, isnull = 0;
+
+		if ((store_reg = dt_regset_alloc(drp)) == -1)
+			longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+
+		if (dnp->dn_kind == DT_NODE_OP2 && dnp->dn_op == DT_TOK_ASGN &&
+		    dnp->dn_right && dnp->dn_right->dn_kind == DT_NODE_INT &&
+		    dnp->dn_right->dn_value == 0)
+			isnull = 1;
+
+		if (!isnull) {
+			if ((scratchbot = dt_regset_alloc(drp)) == -1)
+				longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+
+			emit(dlp, BPF_LOAD(BPF_DW, scratchbot, BPF_REG_FP, DT_STK_DCTX));
+			emit(dlp, BPF_LOAD(BPF_DW, scratchbot, scratchbot, DCTX_SCRATCHMEM));
+			emit(dlp, BPF_MOV_REG(store_reg, dnp->dn_reg));
+			emit(dlp, BPF_ALU64_REG(BPF_SUB, store_reg, scratchbot));
+
+			dt_regset_free(drp, scratchbot);
+		} else
+			emit(dlp, BPF_MOV_IMM(store_reg, DT_CG_ALLOCA_NULLPTR));
+	}
 
 	/* global and local variables (that is, not thread-local) */
 	if (!(idp->di_flags & DT_IDFLG_TLS)) {
@@ -2455,21 +2657,22 @@ dt_cg_store_var(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp,
 			srcsz = dt_node_type_size(dnp->dn_right);
 			size = MIN(srcsz, idp->di_size);
 
-			dt_cg_memcpy(dlp, drp, reg, dnp->dn_reg, size);
+			dt_cg_memcpy(dlp, drp, reg, store_reg, size);
 		} else {
 			size = idp->di_size;
 
 			assert(size > 0 && size <= 8 &&
 			       (size & (size - 1)) == 0);
 
-			emit(dlp, BPF_STORE(ldstw[size], reg, idp->di_offset, dnp->dn_reg));
+			emit(dlp, BPF_STORE(ldstw[size], reg, idp->di_offset, store_reg));
 		}
 
 		dt_regset_free(drp, reg);
-		return;
+		goto out;
 	}
 
 	/* TLS var */
+	/* XXX implement for alloca */
 	varid = idp->di_id - DIF_VAR_OTHER_UBASE;
 	size = idp->di_size;
 
@@ -2485,6 +2688,7 @@ dt_cg_store_var(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp,
 	dt_regset_xalloc(drp, BPF_REG_0);
 	emite(dlp, BPF_CALL_FUNC(idp->di_id), idp);
 	dt_regset_free_args(drp);
+
 	lbl_done = dt_irlist_label(dlp);
 	emit(dlp,  BPF_BRANCH_IMM(BPF_JEQ, dnp->dn_reg, 0, lbl_done));
 
@@ -2518,6 +2722,10 @@ dt_cg_store_var(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp,
 
 	emitl(dlp, lbl_done,
 		   BPF_NOP());
+
+out:
+	if (store_reg != dnp->dn_reg)
+		dt_regset_free(drp, store_reg);
 }
 
 /*
