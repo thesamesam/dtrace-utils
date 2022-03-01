@@ -32,6 +32,8 @@
 #define DTRACEFLT_UPRIV			7	/* Illegal user access */
 #define DTRACEFLT_TUPOFLOW		8	/* Tuple stack overflow */
 #define DTRACEFLT_BADSTACK		9	/* Bad stack */
+#define DTRACEFLT_BADSIZE		10	/* Bad size */
+#define DTRACEFLT_INTERR		11	/* Internal error */
 
 #define DTRACEFLT_LIBRARY		1000	/* Library-level fault */
 

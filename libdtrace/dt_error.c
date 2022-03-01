@@ -206,6 +206,8 @@ dtrace_faultstr(dtrace_hdl_t *dtp, int fault)
 		{ DTRACEFLT_UPRIV,	"invalid user access" },
 		{ DTRACEFLT_TUPOFLOW,	"tuple stack overflow" },
 		{ DTRACEFLT_BADSTACK,	"bad stack" },
+		{ DTRACEFLT_BADSIZE,	"invalid size" },
+		{ DTRACEFLT_INTERR,	"internal error" },
 		{ DTRACEFLT_LIBRARY,	"library-level fault" },
 		{ 0,			NULL }
 	};
