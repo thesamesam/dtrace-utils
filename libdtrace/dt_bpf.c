@@ -207,6 +207,8 @@ populate_probes_map(dtrace_hdl_t *dtp, int fd)
  *		used to store the DTrace machine state, the temporary output
  *		buffer, and temporary storage for stack traces, string
  *		manipulation, etc.
+ * - scratchmem: Storage for alloca() and other per-clause scratch space,
+ *               implemented just as for mem.
  * - strtab:	String table map.  This is a global map with a singleton
  *		element (key 0) that contains the entire string table as a
  *		concatenation of all unique strings (each terminated with a
@@ -315,6 +317,17 @@ dt_bpf_gmap_create(dtrace_hdl_t *dtp)
 		sizeof(uint64_t) + dtp->dt_options[DTRACEOPT_STRSIZE] + 1;
 	if (create_gmap(dtp, "mem", BPF_MAP_TYPE_PERCPU_ARRAY,
 			sizeof(uint32_t), memsz, 1) == -1)
+		return -1;		/* dt_errno is set for us */
+
+	/*
+	 * The size for this is twice what it needs to be, to allow us to bcopy
+	 * things the size of the scratch space to the start of the scratch
+	 * space without tripping verifier failures: see dt_cg_check_bounds.
+	 */
+	if (create_gmap(dtp, "scratchmem", BPF_MAP_TYPE_PERCPU_ARRAY,
+			sizeof(uint32_t),
+			dtp->dt_options[DTRACEOPT_SCRATCHSIZE] *
+			2, 1) == -1)
 		return -1;		/* dt_errno is set for us */
 
 	/*

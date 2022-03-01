@@ -1108,6 +1108,7 @@ static const dt_option_t _dtrace_rtoptions[] = {
 	{ "maxframes", dt_opt_runtime, DTRACEOPT_MAXFRAMES },
 	{ "nspec", dt_opt_runtime, DTRACEOPT_NSPEC },
 	{ "pcapsize", dt_opt_pcapsize, DTRACEOPT_PCAPSIZE },
+	{ "scratchsize", dt_opt_size, DTRACEOPT_SCRATCHSIZE },
 	{ "specsize", dt_opt_size, DTRACEOPT_SPECSIZE },
 	{ "stackframes", dt_opt_runtime, DTRACEOPT_STACKFRAMES },
 	{ "statusrate", dt_opt_rate, DTRACEOPT_STATUSRATE },
