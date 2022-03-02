@@ -2140,13 +2140,36 @@ dt_cg_check_bounds(dt_irlist_t *dlp, dt_regset_t *drp, int regptr, int basereg,
 
 	/*
 	 * Check for below/above scratch space by reduction to offsets and
-	 * comparision, to allow the verifier to bounds-check.  Satisfy
-	 * the verifier after reduction via masking.
+	 * comparision, to allow the verifier to bounds-check.  Satisfy the
+	 * verifier after reduction via masking.  (This also catches null
+	 * pointers of both sorts, which are outside scratch space by
+	 * definition).  Annoyingly we need to take a copy of the basereg and
+	 * scalarize it first, or we might find an out-of-bounds address
+	 * yielding a verifier failure: this means we need to scalarize the reg
+	 * too, even though the subtraction would scalarize it in any case!
+	 * Round and round we go...
 	 */
 
 	if (regptr && basereg > -1) {
-		emit(dlp,  BPF_BRANCH_REG(BPF_JLT, reg, basereg, lbl_err));
-		emit(dlp, BPF_ALU64_REG(BPF_SUB, reg, basereg));
+		int mst, scalarbase;
+
+		if ((scalarbase = dt_regset_alloc(drp)) == -1 ||
+		    (mst = dt_regset_alloc(drp)) == 1)
+			longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+
+		emit(dlp,  BPF_LOAD(BPF_DW, mst, BPF_REG_FP, DT_STK_DCTX));
+		emit(dlp,  BPF_LOAD(BPF_DW, mst, mst, DCTX_MST));
+
+		emit(dlp,  BPF_STORE(BPF_DW, mst, DMST_SCALARIZER, basereg));
+		emit(dlp,  BPF_LOAD(BPF_DW, scalarbase, mst, DMST_SCALARIZER));
+		emit(dlp,  BPF_STORE(BPF_DW, mst, DMST_SCALARIZER, reg));
+		emit(dlp,  BPF_LOAD(BPF_DW, reg, mst, DMST_SCALARIZER));
+
+		emit(dlp, BPF_BRANCH_REG(BPF_JLT, reg, scalarbase, lbl_err));
+		emit(dlp, BPF_ALU64_REG(BPF_SUB, reg, scalarbase));
+
+		dt_regset_free(drp, scalarbase);
+		dt_regset_free(drp, mst);
 	}
 
 	emit(dlp,  BPF_BRANCH_IMM(BPF_JSLT, reg, 0, lbl_err));
