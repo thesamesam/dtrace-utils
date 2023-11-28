@@ -115,7 +115,12 @@ $(shell mkdir -p $(objdir))
 include Makeoptions
 include Makefunctions
 include Makeconfig
+
+# Building config.mk is quite expensive: avoid doing it when only
+# documentation targets and such things are invoked.
+ifeq ($(strip $(filter %clean help% dist tags TAGS gtags,$(MAKECMDGOALS))),)
 -include $(objdir)/config.mk
+endif
 include Build $(sort $(wildcard */Build))
 -include $(objdir)/*.deps
 include Makerules
