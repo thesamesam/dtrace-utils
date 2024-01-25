@@ -20,7 +20,7 @@ if [[ -n $NATIVE_BITNESS_ONLY ]]; then
     NATIVE_BITNESS=64
 fi
 
-NATIVE_BITNESS_OPTION_SUPPORTED="$(echo 'int main (void) { }' | gcc -x c -o /dev/null -m64 - 2>/dev/null && echo t)"
+NATIVE_BITNESS_OPTION_SUPPORTED="$(echo 'int main (void) { }' | ${CC:-gcc} -x c -o /dev/null -m64 - 2>/dev/null && echo t)"
 
 set -e
 
