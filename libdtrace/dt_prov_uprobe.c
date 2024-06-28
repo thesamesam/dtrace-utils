@@ -43,7 +43,6 @@
 
 /* Provider name for the underlying probes. */
 static const char	prvname[] = "uprobe";
-static const char	prvname_is_enabled[] = "uprobe__is_enabled";
 
 #define PP_IS_RETURN	1
 #define PP_IS_FUNCALL	2
@@ -77,7 +76,6 @@ static const dtrace_pattr_t	pattr = {
 { DTRACE_STABILITY_PRIVATE, DTRACE_STABILITY_PRIVATE, DTRACE_CLASS_UNKNOWN },
 };
 
-dt_provimpl_t	dt_uprobe_is_enabled;
 dt_provimpl_t	dt_pid;
 dt_provimpl_t	dt_usdt;
 
@@ -85,8 +83,6 @@ static int populate(dtrace_hdl_t *dtp)
 {
 	if (dt_provider_create(dtp, dt_uprobe.name, &dt_uprobe, &pattr,
 			       NULL) == NULL ||
-	    dt_provider_create(dtp, dt_uprobe_is_enabled.name,
-			       &dt_uprobe_is_enabled, &pattr, NULL) == NULL ||
 	    dt_provider_create(dtp, dt_pid.name, &dt_pid, &pattr,
 			       NULL) == NULL)
 		return -1;			/* errno already set */
@@ -467,7 +463,6 @@ static dt_probe_t *create_underlying(dtrace_hdl_t *dtp,
 	dtrace_probedesc_t	pd;
 	dt_probe_t		*uprp;
 	dt_uprobe_t		*upp;
-	int			is_enabled = 0;
 
 	/*
 	 * The underlying probes (uprobes) represent the tracepoints that pid
@@ -490,8 +485,6 @@ static dt_probe_t *create_underlying(dtrace_hdl_t *dtp,
 		strcpy(prb, "return");
 		break;
 	case DTPPT_IS_ENABLED:
-		is_enabled = 1;
-		/* Fallthrough. */
 	case DTPPT_ENTRY:
 	case DTPPT_OFFSETS:
 		snprintf(prb, sizeof(prb), "%lx", psp->pps_off);
@@ -502,7 +495,7 @@ static dt_probe_t *create_underlying(dtrace_hdl_t *dtp,
 	}
 
 	pd.id = DTRACE_IDNONE;
-	pd.prv = is_enabled ? prvname_is_enabled : prvname;
+	pd.prv = prvname;
 	pd.mod = mod;
 	pd.fun = psp->pps_fun;
 	pd.prb = prb;
@@ -695,21 +688,6 @@ static void enable(dtrace_hdl_t *dtp, dt_probe_t *prp, int is_usdt)
 	}
 
 	/*
-	 * If necessary, we need to enable is-enabled probes too (if they
-	 * exist).
-	 */
-	if (is_usdt) {
-		dtrace_probedesc_t pd;
-		dt_probe_t *iep;
-
-		memcpy(&pd, &prp->desc, sizeof(pd));
-		pd.prv = prvname_is_enabled;
-		iep = dt_probe_lookup(dtp, &pd);
-		if (iep != NULL)
-			dt_probe_enable(dtp, iep);
-	}
-
-	/*
 	 * Finally, ensure we're in the list of enablings as well.
 	 * (This ensures that, among other things, the probes map
 	 * gains entries for us.)
@@ -853,6 +831,29 @@ static int trampoline(dt_pcb_t *pcb, uint_t exitlbl)
 	emit(dlp,  BPF_CALL_HELPER(BPF_FUNC_map_lookup_elem));
 	emit(dlp,  BPF_BRANCH_IMM(BPF_JEQ, BPF_REG_0, 0, lbl_exit));
 
+	if (upp->flags & PP_IS_ENABLED) {
+		/*
+		 * Generate a BPF trampoline for an is-enabled probe.  The is-enabled probe
+		 * prototype looks like:
+		 *
+		 *	int is_enabled(int *arg)
+		 *
+		 * The trampoline writes 1 into the location pointed to by the passed-in arg.
+		 */
+		emit(dlp, BPF_STORE_IMM(BPF_W, BPF_REG_FP, DT_TRAMP_SP_SLOT(0), 1));
+		emit(dlp, BPF_LOAD(BPF_DW, BPF_REG_1, BPF_REG_8, PT_REGS_ARG0));
+		emit(dlp, BPF_MOV_REG(BPF_REG_2, BPF_REG_FP));
+		emit(dlp, BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, DT_TRAMP_SP_SLOT(0)));
+		emit(dlp, BPF_MOV_IMM(BPF_REG_3, sizeof(uint32_t)));
+		emit(dlp, BPF_CALL_HELPER(BPF_FUNC_probe_write_user));
+
+		goto out;
+	}
+
+	/*
+	 * Continue with normal USDT probes.
+	 */
+
 	/* Read the PRID from the table lookup and store to mst->prid. */
 	emit(dlp,  BPF_LOAD(BPF_W, BPF_REG_1, BPF_REG_0, 0));
 	emit(dlp,  BPF_STORE(BPF_W, BPF_REG_7, DMST_PRID, BPF_REG_1));
@@ -909,110 +910,11 @@ out:
 	return 0;
 }
 
-/*
- * Copy the given immediate value into the address given by the specified probe
- * argument.
- */
-static void
-copyout_val(dt_pcb_t *pcb, uint_t lbl, uint32_t val, int arg)
-{
-	dt_regset_t	*drp = pcb->pcb_regs;
-	dt_irlist_t	*dlp = &pcb->pcb_ir;
-
-	emitl(dlp, lbl, BPF_STORE_IMM(BPF_DW, BPF_REG_FP, DT_TRAMP_SP_SLOT(0),
-		val));
-
-	if (dt_regset_xalloc_args(drp) == -1)
-		longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
-	emit(dlp, BPF_LOAD(BPF_DW, BPF_REG_1, BPF_REG_7, DMST_ARG(arg)));
-	emit(dlp, BPF_MOV_REG(BPF_REG_2, BPF_REG_FP));
-	emit(dlp, BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, DT_TRAMP_SP_SLOT(0)));
-	emit(dlp, BPF_MOV_IMM(BPF_REG_3, sizeof(uint32_t)));
-	dt_regset_xalloc(drp, BPF_REG_0);
-	emit(dlp, BPF_CALL_HELPER(BPF_FUNC_probe_write_user));
-
-	/* XXX any point error-checking here? What can we possibly do? */
-	dt_regset_free(drp, BPF_REG_0);
-	dt_regset_free_args(drp);
-}
-
-/*
- * Generate a BPF trampoline for an is-enabled probe.  The is-enabled probe
- * prototype looks like:
- *
- *	int is_enabled(int *arg)
- *
- * The trampoline dereferences the passed-in arg and writes 1 into it if this is
- * one of the processes for which the probe is enabled.
- */
-static int trampoline_is_enabled(dt_pcb_t *pcb, uint_t exitlbl)
-{
-	dt_irlist_t		*dlp = &pcb->pcb_ir;
-	const dt_probe_t	*uprp = pcb->pcb_probe;
-	dt_ident_t		*usdt_prids = dt_dlib_get_map(pcb->pcb_hdl, "usdt_prids");
-
-	assert(usdt_prids != NULL);
-
-	dt_cg_tramp_prologue(pcb);
-
-	/*
-	 * After the dt_cg_tramp_prologue() call, we have:
-	 *				//     (%r7 = dctx->mst)
-	 *				//     (%r8 = dctx->ctx)
-	 */
-	dt_cg_tramp_copy_regs(pcb);
-
-	/*
-	 * Copy in the first function argument, a pointer value to which
-	 * the is-enabled state of the probe will be written (necessarily
-	 * 1 if this probe is running at all).
-	 */
-	emit(dlp,  BPF_LOAD(BPF_DW, BPF_REG_0, BPF_REG_8, PT_REGS_ARG0));
-	emit(dlp,  BPF_STORE(BPF_DW, BPF_REG_7, DMST_ARG(0), BPF_REG_0));
-
-	/*
-	 * Retrieve the PID of the process that caused the probe to fire.
-	 */
-	emit(dlp,  BPF_CALL_HELPER(BPF_FUNC_get_current_pid_tgid));
-	emit(dlp,  BPF_ALU64_IMM(BPF_RSH, BPF_REG_0, 32));
-
-	/*
-	 * Look up in the BPF 'usdt_prids' map.  Space for the look-up key
-	 * will be used on the BPF stack:
-	 *
-	 *     offset                                       value
-	 *
-	 *     -sizeof(usdt_prids_map_key_t)                pid (in %r0)
-	 *
-	 *     -sizeof(usdt_prids_map_key_t) + sizeof(pid_t)
-	 *     ==
-	 *     -sizeof(dtrace_id_t)                         underlying-probe prid
-	 */
-	emit(dlp,  BPF_STORE(BPF_W, BPF_REG_9, (int)(-sizeof(usdt_prids_map_key_t)), BPF_REG_0));
-	emit(dlp,  BPF_STORE_IMM(BPF_W, BPF_REG_9, (int)(-sizeof(dtrace_id_t)), uprp->desc->id));
-	dt_cg_xsetx(dlp, usdt_prids, DT_LBL_NONE, BPF_REG_1, usdt_prids->di_id);
-	emit(dlp,  BPF_MOV_REG(BPF_REG_2, BPF_REG_9));
-	emit(dlp,  BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, (int)(-sizeof(usdt_prids_map_key_t))));
-	emit(dlp,  BPF_CALL_HELPER(BPF_FUNC_map_lookup_elem));
-	emit(dlp,  BPF_BRANCH_IMM(BPF_JEQ, BPF_REG_0, 0, pcb->pcb_exitlbl));
-
-	/*
-	 * If we succeeded, then we use copyout_val() above to assign:
-	 *	    *arg0 = 1;
-	 */
-	copyout_val(pcb, DT_LBL_NONE, 1, 0);
-
-	dt_cg_tramp_return(pcb);
-
-	return 0;
-}
-
 static char *uprobe_name(dev_t dev, ino_t ino, uint64_t addr, int flags)
 {
 	char	*name;
 
-	if (asprintf(&name, "dt_pid%s/%c_%llx_%llx_%lx",
-		     flags & PP_IS_ENABLED ? "_is_enabled" : "",
+	if (asprintf(&name, "dt_pid/%c_%llx_%llx_%lx",
 		     flags & PP_IS_RETURN ? 'r' : 'p', (unsigned long long)dev,
 		     (unsigned long long)ino, (unsigned long)addr) < 0)
 		return NULL;
@@ -1022,7 +924,7 @@ static char *uprobe_name(dev_t dev, ino_t ino, uint64_t addr, int flags)
 
 /*
  * Create a uprobe for a given dev/ino, mapping filename, and address: the
- * uprobe may be a uretprobe or an is-enabled probe.  Return the probe's name as
+ * uprobe may be a uretprobe.  Return the probe's name as
  * a new dynamically-allocated string, or NULL on error.
  */
 static char *uprobe_create(dev_t dev, ino_t ino, const char *mapping_fn,
@@ -1182,21 +1084,6 @@ dt_provimpl_t	dt_uprobe = {
 	.detach		= &detach,
 	.probe_destroy	= &probe_destroy_underlying,
 	.add_probe	= &add_probe_uprobe,
-};
-
-/*
- * Used for underlying is-enabled uprobes.
- */
-dt_provimpl_t	dt_uprobe_is_enabled = {
-	.name		= prvname_is_enabled,
-	.prog_type	= BPF_PROG_TYPE_KPROBE,
-	.populate	= &populate,
-	.load_prog	= &dt_bpf_prog_load,
-	.trampoline	= &trampoline_is_enabled,
-	.attach		= &attach,
-	.probe_info	= &probe_info,
-	.detach		= &detach,
-	.probe_destroy	= &probe_destroy_underlying,
 };
 
 /*
