@@ -757,38 +757,23 @@ static int trampoline(dt_pcb_t *pcb, uint_t exitlbl)
 	 *				//     (%r7 = dctx->mst)
 	 *				//     (%r8 = dctx->ctx)
 	 */
-
 	dt_cg_tramp_copy_regs(pcb);
-	if (upp->flags & PP_IS_RETURN)
-		dt_cg_tramp_copy_rval_from_regs(pcb);
-	else
-		dt_cg_tramp_copy_args_from_regs(pcb,
-						!(upp->flags & PP_IS_FUNCALL));
 
 	/*
-	 * Retrieve the PID of the process that caused the probe to fire.
+	 * Hold the PID of the process that caused the probe to fire in %r6.
 	 */
 	emit(dlp,  BPF_CALL_HELPER(BPF_FUNC_get_current_pid_tgid));
 	emit(dlp,  BPF_ALU64_IMM(BPF_RSH, BPF_REG_0, 32));
+	emit(dlp,  BPF_MOV_REG(BPF_REG_6, BPF_REG_0));
 
 	/*
-	 * Generate a composite conditional clause:
+	 * Loop over overlying probes, calling clauses for those that match:
 	 *
-	 *	if (pid == PID1) {
-	 *		dctx->mst->prid = PRID1;
-	 *		< any number of clause calls >
-	 *		goto exit;
-	 *	} else if (pid == PID2) {
-	 *		dctx->mst->prid = PRID2;
-	 *		< any number of clause calls >
-	 *		goto exit;
-	 *	} else if (pid == ...) {
-	 *		< ... >
-	 *	}
-	 *
-	 * It is valid and safe to use %r0 to hold the pid value because there
-	 * are no assignments to %r0 possible in between the conditional
-	 * statements.
+	 *	for overlying probes (that match except possibly for pid)
+	 *		if (pid matches) {
+	 *			dctx->mst->prid = PRID1;
+	 *			< any number of clause calls >
+	 *		}
 	 */
 	for (pop = dt_list_next(&upp->probes); pop != NULL;
 	     pop = dt_list_next(pop)) {
@@ -804,13 +789,21 @@ static int trampoline(dt_pcb_t *pcb, uint_t exitlbl)
 		assert(idp != NULL);
 
 		/*
+		 * Populate probe arguments.
+		 */
+		if (upp->flags & PP_IS_RETURN)
+			dt_cg_tramp_copy_rval_from_regs(pcb);
+		else
+			dt_cg_tramp_copy_args_from_regs(pcb,
+			    prp->prov->impl == &dt_pid ? 1 : 0);
+
+		/*
 		 * Check whether this pid-provider probe serves the current
 		 * process, and emit a sequence of clauses for it when it does.
 		 */
-		emit(dlp,  BPF_BRANCH_IMM(BPF_JNE, BPF_REG_0, pid, lbl_next));
+		emit(dlp,  BPF_BRANCH_IMM(BPF_JNE, BPF_REG_6, pid, lbl_next));
 		emite(dlp, BPF_STORE_IMM(BPF_W, BPF_REG_7, DMST_PRID, prp->desc->id), idp);
 		dt_cg_tramp_call_clauses(pcb, prp, DT_ACTIVITY_ACTIVE);
-		emit(dlp,  BPF_JUMP(lbl_exit));
 		emitl(dlp, lbl_next,
 			   BPF_NOP());
 	}
