@@ -319,6 +319,11 @@ ignore_clause(dtrace_hdl_t *dtp, int n, const dt_probe_t *uprp)
 	 * If we cannot ignore this statement, try to use uprp.
 	 */
 
+	/* We know what function we're in.  It must match the probe description (unless "-"). */
+	if (strcmp(pdp->fun, "-") != 0 &&
+	    !dt_gmatch(uprp->desc->fun, pdp->fun))
+		return 1;
+
 	return 0;
 }
 
