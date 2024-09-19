@@ -1208,14 +1208,6 @@ dt_pid_create_usdt_probes(dtrace_probedesc_t *pdp, dtrace_hdl_t *dtp, dt_pcb_t *
 }
 
 int
-dt_pid_create_probes(dtrace_probedesc_t *pdp, dtrace_hdl_t *dtp, dt_pcb_t *pcb)
-{
-	if (dt_pid_create_pid_probes(pdp, dtp, pcb))
-		return -1;
-	return dt_pid_create_usdt_probes(pdp, dtp, pcb);
-}
-
-int
 dt_pid_create_probes_module(dtrace_hdl_t *dtp, dt_proc_t *dpr)
 {
 	dtrace_prog_t *pgp;
