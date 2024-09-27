@@ -13,7 +13,7 @@ EXTERNAL_64BIT_TRIGGERS = testprobe readwholedir mmap bogus-ioctl open delaydie 
     ustack-tst-spin ustack-tst-mtspin \
     visible-constructor visible-constructor-static visible-constructor-static-unstripped
 
-EXTERNAL_64BIT_SDT_TRIGGERS = usdt-tst-argmap usdt-tst-args usdt-tst-forker usdt-tst-special
+EXTERNAL_64BIT_SDT_TRIGGERS = usdt-tst-argmap usdt-tst-args usdt-tst-forker usdt-tst-defer usdt-tst-special
 EXTERNAL_64BIT_TRIGGERS += $(EXTERNAL_64BIT_SDT_TRIGGERS)
 
 EXTERNAL_32BIT_TRIGGERS := visible-constructor-32
@@ -202,6 +202,9 @@ usdt-tst-args_PROV := usdt-tst-args-prov.d
 
 # usdt-tst-forker calls USDT probes based on dtrace -h
 usdt-tst-forker_PROV := usdt-tst-forker-prov.d
+
+# usdt-tst-defer calls USDT probes based on dtrace -h
+usdt-tst-defer_PROV := usdt-tst-defer-prov.d
 
 # usdt-tst-special calls USDT probes based on dtrace -h
 usdt-tst-special_CFLAGS := -fno-inline -O2
