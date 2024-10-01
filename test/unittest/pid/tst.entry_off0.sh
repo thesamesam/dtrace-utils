@@ -6,6 +6,10 @@
 # http://oss.oracle.com/licenses/upl.
 #
 
+# Although the D script takes only "one second," it takes a long time to
+# shut down.  Until that has been solved, increase the timeout for the test.
+# @@timeout: 120
+
 dtrace=$1
 
 trig=`pwd`/test/triggers/ustack-tst-basic
