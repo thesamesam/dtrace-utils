@@ -263,6 +263,17 @@ clean_usdt_probes(dtrace_hdl_t *dtp)
 	return 0;
 }
 
+/*
+ * Judge whether clause "n" could ever be called as a USDT probe
+ * for this underlying probe.
+ */
+static int
+ignore_clause(dtrace_hdl_t *dtp, int n, const dt_probe_t *uprp)
+{
+	/* To be safe, ignore nothing. */
+	return 0;
+}
+
 static int add_probe_uprobe(dtrace_hdl_t *dtp, dt_probe_t *prp)
 {
 	dtrace_difo_t   *dp;
@@ -391,6 +402,9 @@ static int add_probe_usdt(dtrace_hdl_t *dtp, dt_probe_t *prp)
 
 				stp = dtp->dt_stmts[n];
 				if (stp == NULL)
+					continue;
+
+				if (ignore_clause(dtp, n, uprp))
 					continue;
 
 				if (dt_gmatch(prp->desc->prv, stp->dtsd_ecbdesc->dted_probe.prv) &&
@@ -867,13 +881,17 @@ static int trampoline(dt_pcb_t *pcb, uint_t exitlbl)
 	for (n = 0; n < dtp->dt_stmt_nextid; n++) {
 		dtrace_stmtdesc_t *stp;
 		dt_ident_t	*idp;
-		uint_t		lbl_next = dt_irlist_label(dlp);
+		uint_t		lbl_next;
 
 		stp = dtp->dt_stmts[n];
 		if (stp == NULL)
 			continue;
 
+		if (ignore_clause(dtp, n, uprp))
+			continue;
+
 		idp = stp->dtsd_clause;
+		lbl_next = dt_irlist_label(dlp);
 
 		/* If the lowest %r6 bit is 0, skip over this clause. */
 		emit(dlp,  BPF_MOV_REG(BPF_REG_1, BPF_REG_6));
