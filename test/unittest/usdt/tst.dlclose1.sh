@@ -29,7 +29,7 @@
 # The second should not.
 
 dtrace=$1
-CC=/usr/bin/gcc
+CC=${CC:-/usr/bin/gcc}
 CFLAGS=
 
 DIRNAME="$tmpdir/usdt-dlclose1.$$.$RANDOM"

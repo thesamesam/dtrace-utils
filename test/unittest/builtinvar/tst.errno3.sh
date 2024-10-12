@@ -7,7 +7,7 @@
 #
 
 dtrace=$1
-CC=/usr/bin/gcc
+CC=${CC:-/usr/bin/gcc}
 
 DIRNAME="$tmpdir/builtinvar-errno3.$$.$RANDOM"
 mkdir -p $DIRNAME

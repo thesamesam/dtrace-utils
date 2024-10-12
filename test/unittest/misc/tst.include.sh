@@ -13,7 +13,7 @@ if [ $# != 1 ]; then
 fi
 
 dtrace=$1
-CC=/usr/bin/gcc
+CC=${CC:-/usr/bin/gcc}
 CFLAGS=
 
 DIR="$tmpdir/misc-include.$$.$RANDOM"

@@ -17,7 +17,7 @@
 ##
 
 dtrace=$1
-CC=/usr/bin/gcc
+CC=${CC:-/usr/bin/gcc}
 CFLAGS=
 
 DIRNAME="$tmpdir/aggs-aggmod_full2.$$.$RANDOM"

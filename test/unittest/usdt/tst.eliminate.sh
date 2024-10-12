@@ -16,7 +16,7 @@ if [ $# != 1 ]; then
 fi
 
 dtrace=$1
-CC=/usr/bin/gcc
+CC=${CC:-/usr/bin/gcc}
 CFLAGS="$test_cppflags"
 LDFLAGS="$test_ldflags"
 
@@ -71,13 +71,13 @@ if [ $? -ne 0 ]; then
 	exit 1
 fi
 
-nm test.o | grep \$dtrace > /dev/null
+${NM:-nm} test.o | grep \$dtrace > /dev/null
 if [ $? -ne 0 ]; then
 	echo "no temporary symbols in the object file" >& 2
 	exit 1
 fi
 
-nm test | grep \$dtrace > /dev/null
+${NM:-nm} test | grep \$dtrace > /dev/null
 if [ $? -eq 0 ]; then
 	echo "failed to eliminate temporary symbols" >& 2
 	exit 1

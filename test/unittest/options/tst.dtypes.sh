@@ -14,14 +14,14 @@ if [ ! -r $tmpdir/dtypes.ctf ]; then
 	exit 1
 fi
 
-if objdump --help | grep ctf >/dev/null; then
-	objcopy --add-section=.ctf=$tmpdir/dtypes.ctf /bin/true $tmpdir/dtypes.o
+if ${OBJDUMP:-objdump} --help | grep ctf >/dev/null; then
+	${OBJCOPY:-objcopy} --add-section=.ctf=$tmpdir/dtypes.ctf /bin/true $tmpdir/dtypes.o
 	if [ $? -ne 0 ]; then
 		echo "ERROR: Failed to create ELF object from dtypes.ctf"
 		exit 1
 	fi
 
-	objdump --ctf=.ctf $tmpdir/dtypes.o | \
+	${OBJDUMP:-objdump} --ctf=.ctf $tmpdir/dtypes.o | \
 		gawk '/CTF_VERSION/ { found = 1; next; }
 		     found && $1 ~ /0x[0-9A-Fa-f]+:/ { cnt++; next; }
 		     END { print "D CTF data" (found ? " " : " NOT ") "found";

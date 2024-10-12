@@ -10,7 +10,7 @@
 set -e
 
 dtrace=$1
-CC=/usr/bin/gcc
+CC=${CC:-/usr/bin/gcc}
 OLDDIRNAME=${PWD}
 CFLAGS="-I${OLDDIRNAME}/include -I${OLDDIRNAME}/uts/common"
 

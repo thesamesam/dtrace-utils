@@ -13,7 +13,7 @@ fi
 # @@xfail: dtv2, no wildcard usdt probes yet
 
 dtrace=$1
-CC=/usr/bin/gcc
+CC=${CC:-/usr/bin/gcc}
 CFLAGS="$test_cppflags"
 LDFLAGS="$test_ldflags"
 

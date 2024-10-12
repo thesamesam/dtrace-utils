@@ -11,7 +11,7 @@ if [ $# != 1 ]; then
 fi
 
 dtrace=$1
-CC=/usr/bin/gcc
+CC=${CC:-/usr/bin/gcc}
 CFLAGS="-fno-inline -pie $test_cppflags"
 LDFLAGS="-pie $test_ldflags"
 

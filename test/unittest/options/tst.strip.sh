@@ -7,7 +7,7 @@
 #
 
 dtrace=$1
-CC=/usr/bin/gcc
+CC=${CC:-/usr/bin/gcc}
 CFLAGS=
 
 DIRNAME="$tmpdir/strip.$$.$RANDOM"
@@ -48,7 +48,7 @@ fi
 
 # link with and without -xstrip, dumping the DOF section
 
-objdump="objdump --full-contents --section=.SUNW_dof prov.o"
+objdump="${OBJDUMP:-objdump} --full-contents --section=.SUNW_dof prov.o"
 
 $dtrace $dt_flags -G -xstrip -s prov.d test.o
 if [ $? -ne 0 ]; then
