@@ -62,26 +62,6 @@ const dt_version_t _dtrace_versions[] = {
 };
 
 /*
- * List of provider modules that register providers and probes.  A single
- * provider module may create multiple providers.
- */
-static const dt_provimpl_t *dt_providers[] = {
-	&dt_dtrace,		/* list dt_dtrace first */
-	&dt_cpc,
-	&dt_fbt_fprobe,
-	&dt_io,
-	&dt_ip,
-	&dt_lockstat,
-	&dt_proc,
-	&dt_profile,
-	&dt_rawtp,
-	&dt_sched,
-	&dt_sdt,
-	&dt_syscall,
-	&dt_uprobe,
-};
-
-/*
  * Table of global identifiers.  This is used to populate the global identifier
  * hash when a new dtrace client open occurs.  For more info see dt_ident.h.
  * The global identifiers that represent functions use the dt_idops_func ops
@@ -1210,7 +1190,7 @@ dtrace_init(dtrace_hdl_t *dtp)
 	 * known providers.
 	 */
 	dt_probe_init(dtp);
-	for (i = 0; i < ARRAY_SIZE(dt_providers); i++) {
+	for (i = 0; dt_providers[i]; i++) {
 		int	n;
 
 		n = dt_providers[i]->populate(dtp);

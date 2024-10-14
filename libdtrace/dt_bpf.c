@@ -1275,6 +1275,10 @@ dt_bpf_load_progs(dtrace_hdl_t *dtp, uint_t cflags)
 		int		fd;
 		int		rc = -1;
 
+		/* Handle probes discovered after compilation. */
+		if (prp->prov->impl->add_probe)
+			prp->prov->impl->add_probe(dtp, prp);
+
 		dp = prp->difo;
 		if (dp == NULL)
 			continue;
