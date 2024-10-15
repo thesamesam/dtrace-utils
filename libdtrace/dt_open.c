@@ -797,6 +797,14 @@ dt_vopen(int version, int flags, int *errp,
 	dtp->dt_options[DTRACEOPT_SWITCHRATE] = 0;
 	dtp->dt_options[DTRACEOPT_AGGRATE] = 0;
 
+	/*
+	 * Set the default maximum number of (added) USDT probes.
+	 */
+	dtp->dt_options[DTRACEOPT_NUSDTPROBES] = 256;
+
+	/*
+	 * Pre-processor.
+	 */
 	dtp->dt_cpp_argv[0] = (char *)strbasename(dtp->dt_cpp_path);
 
 	snprintf(isadef, sizeof(isadef), "-D__SUNW_D_%u",

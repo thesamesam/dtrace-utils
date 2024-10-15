@@ -88,6 +88,7 @@ extern dt_provimpl_t dt_sched;
 extern dt_provimpl_t dt_sdt;
 extern dt_provimpl_t dt_syscall;
 extern dt_provimpl_t dt_uprobe;
+extern dt_provimpl_t dt_usdt;
 
 extern const dt_provimpl_t *dt_providers[];
 

@@ -39,6 +39,7 @@
 #include "dt_probe.h"
 #include "dt_pid.h"
 #include "dt_string.h"
+#include "port.h"
 
 /* Provider name for the underlying probes. */
 static const char	prvname[] = "uprobe";
@@ -63,6 +64,11 @@ typedef struct list_probe {
 	dt_probe_t	*probe;
 } list_probe_t;
 
+typedef struct list_key {
+	dt_list_t		list;
+	usdt_prids_map_key_t	key;
+} list_key_t;
+
 static const dtrace_pattr_t	pattr = {
 { DTRACE_STABILITY_EVOLVING, DTRACE_STABILITY_EVOLVING, DTRACE_CLASS_ISA },
 { DTRACE_STABILITY_PRIVATE, DTRACE_STABILITY_PRIVATE, DTRACE_CLASS_UNKNOWN },
@@ -82,8 +88,15 @@ static int populate(dtrace_hdl_t *dtp)
 	    dt_provider_create(dtp, dt_uprobe_is_enabled.name,
 			       &dt_uprobe_is_enabled, &pattr, NULL) == NULL ||
 	    dt_provider_create(dtp, dt_pid.name, &dt_pid, &pattr,
-			       NULL) == NULL ||
-	    dt_provider_create(dtp, dt_usdt.name, &dt_usdt, &pattr,
+			       NULL) == NULL)
+		return -1;			/* errno already set */
+
+	return 0;
+}
+
+static int populate_usdt(dtrace_hdl_t *dtp)
+{
+	if (dt_provider_create(dtp, dt_usdt.name, &dt_usdt, &pattr,
 			       NULL) == NULL)
 		return -1;			/* errno already set */
 
@@ -123,6 +136,321 @@ static void probe_destroy(dtrace_hdl_t *dtp, void *datap)
 	free_probe_list(dtp, datap);
 }
 
+/*
+ * Disable an overlying USDT probe.
+ */
+static void probe_disable(dtrace_hdl_t *dtp, dt_probe_t *prp)
+{
+	list_probe_t	*pup;
+
+	/* Remove from enablings. */
+	dt_list_delete(&dtp->dt_enablings, prp);
+
+	/* Make it evident from the probe that it is not in enablings. */
+	((dt_list_t *)prp)->dl_prev = NULL;
+	((dt_list_t *)prp)->dl_next = NULL;
+
+	/* Free up its list of underlying probes. */
+	while ((pup = dt_list_next(prp->prv_data)) != NULL) {
+		dt_list_delete(prp->prv_data, pup);
+		dt_free(dtp, pup);
+	}
+	dt_free(dtp, prp->prv_data);
+	prp->prv_data = NULL;
+}
+
+/*
+ * Clean up stale pids from among the USDT probes.
+ */
+static int
+clean_usdt_probes(dtrace_hdl_t *dtp)
+{
+	int			fdprids = dtp->dt_usdt_pridsmap_fd;
+	int			fdnames = dtp->dt_usdt_namesmap_fd;
+	usdt_prids_map_key_t	key, nxt;
+	usdt_prids_map_val_t	val;
+	list_key_t		keys_to_delete, *elem, *elem_next;
+	dt_probe_t		*prp, *prp_next;
+
+	/* Initialize list of usdt_prids keys to delete. */
+	memset(&keys_to_delete, 0, sizeof(keys_to_delete));
+
+	/* Initialize usdt_prids key to a pid/uprid that cannot be found. */
+	key.pid = 0;
+	key.uprid = 0;
+
+	/* Loop over usdt_prids entries. */
+	while (dt_bpf_map_next_key(fdprids, &key, &nxt) == 0) {
+		memcpy(&key, &nxt, sizeof(usdt_prids_map_key_t));
+
+		if (dt_bpf_map_lookup(fdprids, &key, &val) == -1)
+			return dt_set_errno(dtp, EDT_BPF);
+
+		/* Check if the process is still running. */
+		if (!Pexists(key.pid)) {
+			/*
+			 * Delete the usdt_names entry.
+			 *
+			 * Note that a PRID might correspond to multiple
+			 * sites.  So, as we loop over usdt_prids entries,
+			 * we might delete the same usdt_names entry
+			 * multiple times.  That's okay.
+			 */
+			dt_bpf_map_delete(fdnames, &val.prid);
+
+			/*
+			 * Delete the usdt_prids entry.
+			 *
+			 * Note that we do not want to disrupt the iterator.
+			 * So we just add the key to a list and will walk
+			 * the list later for actual deletion.
+			 */
+			elem = calloc(1, sizeof(list_key_t));
+			elem->key.pid = key.pid;
+			elem->key.uprid = key.uprid;
+			dt_list_append((dt_list_t *)&keys_to_delete, elem);
+
+			continue;
+		}
+
+		/*
+		 * FIXME.  There might be another case, where the process
+		 * is still running, but some of its USDT probes are gone?
+		 * So maybe we have to check for the existence of one of
+		 *     dtrace_probedesc_t *pdp = dtp->dt_probes[val.prid]->desc;
+		 *     char *prv = ...pdp->prv minus the numerial part;
+		 *
+		 *     /run/dtrace/probes/$pid/$pdp->prv/$pdp->mod/$pdp->fun/$pdp->prb
+		 *     /run/dtrace/stash/dof-pid/$pid/0/parsed/$prv:$pdp->mod:$pdp->fun:$pdp->prb
+		 *     /run/dtrace/stash/dof-pid/$pid/.../parsed/$prv:$pdp->mod:$pdp->fun:$pdp->prb
+		 */
+	}
+
+	/*
+	 * Delete the usdt_prids keys in our list.
+	 */
+	for (elem = dt_list_next(&keys_to_delete); elem != NULL; elem = elem_next) {
+		elem_next = dt_list_next(elem);
+
+		dt_bpf_map_delete(fdprids, &elem->key);
+		free(elem);
+	}
+
+	/* Clean up enablings. */
+	for (prp = dt_list_next(&dtp->dt_enablings); prp != NULL; prp = prp_next) {
+		pid_t		pid;
+
+		prp_next = dt_list_next(prp);
+
+		/* Make sure it is an overlying USDT probe. */
+		if (prp->prov->impl != &dt_usdt)
+			continue;
+
+		/* FIXME passing in NULL pcb and dpr wreaks havoc on error reporting? */
+		/*
+		 * Nick writes:
+		 * This is a general problem with running compiler-adjacent things outside
+		 * compile time. I think we should adjust dt_pid_error() so that it works
+		 * with NULL pcb and dpr at once, probably by using the code path for
+		 * pcb != NULL and augmenting it so that it passes in NULL for the region and
+		 * filename args and 0 for the lineno if pcb is NULL. (dt_set_errmsg can
+		 * already handle this case.)
+		 */
+		pid = dt_pid_get_pid(prp->desc, dtp, NULL, NULL);
+
+		if (Pexists(pid))
+			continue;
+
+		probe_disable(dtp, prp);
+	}
+
+	return 0;
+}
+
+static int add_probe_uprobe(dtrace_hdl_t *dtp, dt_probe_t *prp)
+{
+	dtrace_difo_t   *dp;
+	int		cflags, fd, rc = -1;
+	dtrace_optval_t	dest_ok = DTRACEOPT_UNSET;
+
+	if (dtp->dt_active == 0)
+		return 0;
+
+	/*
+	 * Strictly speaking, we want the value passed in to
+	 * dtrace_go().  In practice, its flags pertain to
+	 * compilation and disassembly, which at this stage
+	 * no longer interest us.
+	 * FIXME:  Actually, we might want debug output (e.g.,
+	 * disassembly) for trampoline construction.
+	 */
+	cflags = 0;
+
+	/* Check if the probe is already set up. */
+	if (prp->difo)
+		return 0;
+
+	/* Make program. */
+	dp = dt_construct(dtp, prp, cflags, NULL);
+	if (dp == NULL)
+		return 0;        // FIXME in dt_bpf_make_progs() this is a fatal error; should we do the same here?
+	prp->difo = dp;
+
+	/* Load program. */
+	if (dt_link(dtp, prp, dp, NULL) == -1)
+		return 0;        // FIXME in dt_bpf_load_progs() this is a fatal error; should we do the same here?
+
+	dtrace_getopt(dtp, "destructive", &dest_ok);
+	if (dp->dtdo_flags & DIFOFLG_DESTRUCTIVE &&
+	    dest_ok == DTRACEOPT_UNSET)
+		return dt_set_errno(dtp, EDT_DESTRUCTIVE);
+
+	fd = dt_bpf_load_prog(dtp, prp, dp, cflags);
+	if (fd == -1)
+		return 0;        // FIXME in dt_bpf_load_progs() this is a fatal error; should we do the same here?
+
+	if (prp->prov->impl->attach)
+		rc = prp->prov->impl->attach(dtp, prp, fd);
+
+	if (rc == -ENOTSUPP) {
+		char    *s;
+
+		close(fd);
+		if (asprintf(&s, "Failed to enable %s:%s:%s:%s",
+			      prp->desc->prv, prp->desc->mod,
+			      prp->desc->fun, prp->desc->prb) == -1)
+			return dt_set_errno(dtp, EDT_ENABLING_ERR);
+		dt_handle_rawerr(dtp, s);
+		free(s);
+	} else if (rc < 0) {
+		close(fd);
+		return dt_set_errno(dtp, EDT_ENABLING_ERR);
+	}
+
+	return 0;
+}
+
+static int add_probe_usdt(dtrace_hdl_t *dtp, dt_probe_t *prp)
+{
+	char				probnam[DTRACE_FULLNAMELEN], *p;
+	const dtrace_probedesc_t	*pdp = prp->desc;
+	int				fd = dtp->dt_usdt_namesmap_fd;
+	pid_t				pid;
+	list_probe_t			*pup;
+
+	/* Add probe name elements to usdt_names map. */
+	p = probnam;
+	memset(p, 0, sizeof(probnam));
+	snprintf(p, DTRACE_PROVNAMELEN, "%s", pdp->prv);
+	p += DTRACE_PROVNAMELEN;
+	snprintf(p, DTRACE_MODNAMELEN, "%s", pdp->mod);
+	p += DTRACE_MODNAMELEN;
+	snprintf(p, DTRACE_FUNCNAMELEN, "%s", pdp->fun);
+	p += DTRACE_FUNCNAMELEN;
+	snprintf(p, DTRACE_NAMELEN, "%s", pdp->prb);
+	if (dt_bpf_map_update(fd, &pdp->id, probnam) == -1)
+		assert(0);   // FIXME do something here
+
+	/* FIXME passing in NULL pcb and dpr wreaks havoc on error reporting? */
+	/*
+	 * Nick writes:
+	 * This is a general problem with running compiler-adjacent things outside
+	 * compile time. I think we should adjust dt_pid_error() so that it works
+	 * with NULL pcb and dpr at once, probably by using the code path for
+	 * pcb != NULL and augmenting it so that it passes in NULL for the region and
+	 * filename args and 0 for the lineno if pcb is NULL. (dt_set_errmsg can
+	 * already handle this case.)
+	 */
+	pid = dt_pid_get_pid(prp->desc, dtp, NULL, NULL);
+
+	/* Even though we just enabled this, check it's still live. */
+	if (!Pexists(pid)) {
+		probe_disable(dtp, prp);
+		dt_bpf_map_delete(fd, &pdp->id);
+
+		return 0;
+	}
+
+	/* Add prid and bit mask to usdt_prids map. */
+	for (pup = prp->prv_data; pup != NULL; pup = dt_list_next(pup)) {
+		dt_probe_t		*uprp = pup->probe;
+		long long		mask = 0, bit = 1;
+		usdt_prids_map_key_t	key;
+		usdt_prids_map_val_t	val;
+		dt_uprobe_t		*upp = uprp->prv_data;
+
+		/*
+		 * For is-enabled probes, the bit mask does not matter.
+		 * It is possible that we have this underlying probe due to
+		 * an overlying pid-offset probe and that we will not know
+		 * until later, when some new pid is created, that we also
+		 * have an overlying USDT is-enabled probe, but missing this
+		 * optimization opportunity is okay.
+		 */
+		if (uprp->prov->impl == &dt_uprobe && !(upp->flags & PP_IS_ENABLED)) {
+			int n;
+
+			for (n = 0; n < dtp->dt_stmt_nextid; n++) {
+				dtrace_stmtdesc_t *stp;
+
+				stp = dtp->dt_stmts[n];
+				if (stp == NULL)
+					continue;
+
+				if (dt_gmatch(prp->desc->prv, stp->dtsd_ecbdesc->dted_probe.prv) &&
+				    dt_gmatch(prp->desc->mod, stp->dtsd_ecbdesc->dted_probe.mod) &&
+				    dt_gmatch(prp->desc->fun, stp->dtsd_ecbdesc->dted_probe.fun) &&
+				    dt_gmatch(prp->desc->prb, stp->dtsd_ecbdesc->dted_probe.prb))
+					mask |= bit;
+
+				bit <<= 1;
+			}
+		}
+
+		key.pid = pid;
+		key.uprid = uprp->desc->id;
+
+		val.prid = prp->desc->id;
+		val.mask = mask;
+
+		// FIXME Check return value, but how should errors be handled?
+		dt_bpf_map_update(dtp->dt_usdt_pridsmap_fd, &key, &val);
+	}
+
+	return 0;
+}
+
+/*
+ * Discover new probes.
+ */
+static int discover(dtrace_hdl_t *dtp)
+{
+	int		i;
+	dt_pcb_t	pcb;
+
+	/* Clean up stale pids from among the USDT probes. */
+	clean_usdt_probes(dtp);
+
+	/* Discover new probes, placing them in dt_probes[]. */
+	/*
+	 * pcb is only used inside of dt_pid_error() to get:
+	 *     pcb->pcb_region
+	 *     pcb->pcb_filetag
+	 *     pcb->pcb_fileptr
+	 * While pcb cannot be NULL, these other things apparently can be.
+	 */
+	memset(&pcb, 0, sizeof(dt_pcb_t));
+	for (i = 0; i < dtp->dt_stmt_nextid; i++) {
+		dtrace_stmtdesc_t *stp;
+
+		stp = dtp->dt_stmts[i];
+		if (stp == NULL)
+			continue;
+		dt_pid_create_usdt_probes(&stp->dtsd_ecbdesc->dted_probe, dtp, &pcb);
+	}
+
+	return 0;
+}
 
 /*
  * Look up or create an underlying (real) probe, corresponding directly to a
@@ -782,6 +1110,7 @@ dt_provimpl_t	dt_uprobe = {
 	.probe_info	= &probe_info,
 	.detach		= &detach,
 	.probe_destroy	= &probe_destroy_underlying,
+	.add_probe	= &add_probe_uprobe,
 };
 
 /*
@@ -816,7 +1145,10 @@ dt_provimpl_t	dt_pid = {
 dt_provimpl_t	dt_usdt = {
 	.name		= "usdt",
 	.prog_type	= BPF_PROG_TYPE_UNSPEC,
+	.populate	= &populate_usdt,
 	.provide_probe	= &provide_usdt_probe,
 	.enable		= &enable_usdt,
 	.probe_destroy	= &probe_destroy,
+	.discover	= &discover,
+	.add_probe	= &add_probe_usdt,
 };

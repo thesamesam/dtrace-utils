@@ -41,6 +41,7 @@ const dt_provimpl_t *dt_providers[] = {
 	&dt_sdt,
 	&dt_syscall,
 	&dt_uprobe,
+	&dt_usdt,
 	NULL
 };
 
