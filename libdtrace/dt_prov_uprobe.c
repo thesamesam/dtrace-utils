@@ -27,6 +27,7 @@
  */
 #include <sys/types.h>
 #include <assert.h>
+#include <ctype.h>
 #include <errno.h>
 #include <string.h>
 
@@ -37,6 +38,7 @@
 #include "dt_list.h"
 #include "dt_provider_tp.h"
 #include "dt_probe.h"
+#include "dt_program.h"
 #include "dt_pid.h"
 #include "dt_string.h"
 #include "port.h"
@@ -270,7 +272,53 @@ clean_usdt_probes(dtrace_hdl_t *dtp)
 static int
 ignore_clause(dtrace_hdl_t *dtp, int n, const dt_probe_t *uprp)
 {
-	/* To be safe, ignore nothing. */
+	dtrace_stmtdesc_t	*stp = dtp->dt_stmts[n];
+	dtrace_probedesc_t	*pdp = &stp->dtsd_ecbdesc->dted_probe;
+
+	/*
+	 * Some clauses could never be called for a USDT probe,
+	 * regardless of the underlying probe uprp.  Cache this
+	 * status in the clause flags for dt_stmts[n].
+	 */
+	if (dt_stmt_clsflag_test(stp, DT_CLSFLAG_USDT_INCLUDE | DT_CLSFLAG_USDT_EXCLUDE) == 0) {
+		char lastchar = pdp->prv[strlen(pdp->prv) - 1];
+
+		/*
+		 * If the last char in the provider description is
+		 * neither '*' nor a digit, it cannot be a USDT probe.
+		 */
+		if (lastchar != '*' && !isdigit(lastchar)) {
+			dt_stmt_clsflag_set(stp, DT_CLSFLAG_USDT_EXCLUDE);
+			return 1;
+		}
+
+		/*
+		 * If the provider description is "pid[0-9]*", it
+		 * is a pid probe, not USDT.
+		 */
+		if (strncmp(pdp->prv, "pid", 3) == 0) {
+			int i, l = strlen(pdp->prv);
+
+			for (i = 3; i < l; i++)
+				if (!isdigit((pdp->prv[i])))
+					break;
+
+			if (i == l) {
+				dt_stmt_clsflag_set(stp, DT_CLSFLAG_USDT_EXCLUDE);
+				return 1;
+			}
+		}
+
+		/* Otherwise, it is possibly a USDT probe. */
+		dt_stmt_clsflag_set(stp, DT_CLSFLAG_USDT_INCLUDE);
+	}
+	if (dt_stmt_clsflag_test(stp, DT_CLSFLAG_USDT_EXCLUDE) == 1)
+		return 1;
+
+	/*
+	 * If we cannot ignore this statement, try to use uprp.
+	 */
+
 	return 0;
 }
 
@@ -456,7 +504,8 @@ static int discover(dtrace_hdl_t *dtp)
 		stp = dtp->dt_stmts[i];
 		if (stp == NULL)
 			continue;
-		dt_pid_create_usdt_probes(&stp->dtsd_ecbdesc->dted_probe, dtp, &pcb);
+		if (dt_stmt_clsflag_test(stp, DT_CLSFLAG_USDT_EXCLUDE) != 1)
+			dt_pid_create_usdt_probes(&stp->dtsd_ecbdesc->dted_probe, dtp, &pcb);
 	}
 
 	return 0;
