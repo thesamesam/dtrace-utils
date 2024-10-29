@@ -5,6 +5,10 @@
  * http://oss.oracle.com/licenses/upl.
  */
 
+/* @@xfail: dtv2, chill not implemented yet */
+
+#pragma D option destructive
+
 BEGIN
 {
 	self->spec = speculation();
@@ -15,6 +19,7 @@ BEGIN
 {
 	this->one = 1;
 	this->two = 2;
+	chill(1);
 	speculate(self->spec);
 }
 
