@@ -102,6 +102,7 @@ PKGCONFIGDIR = $(prefix)/share/pkgconfig
 INSTPKGCONFIGDIR = $(DESTDIR)$(PKGCONFIGDIR)
 TESTDIR = $(LIBDIR)/dtrace/testsuite
 INSTTESTDIR = $(DESTDIR)$(TESTDIR)
+WITH_SYSTEMD = y
 TARGETS =
 
 DTRACE ?= $(objdir)/dtrace
