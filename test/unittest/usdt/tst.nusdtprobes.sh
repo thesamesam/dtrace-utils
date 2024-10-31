@@ -121,6 +121,7 @@ for nusdt in "" "-xnusdtprobes=40" "-xnusdtprobes=39"; do
 		for (( immbr = 0; immbr < $nmmbrs; immbr++ )); do
 			./main &
 			pids[$immbr]=$!
+			disown %+
 			for j in `seq 0 9`; do
 				echo testprov${pids[$immbr]} main main foo$j >> check.txt
 			done

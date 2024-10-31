@@ -142,8 +142,10 @@ fi
 
 ./main >& out.1 &
 pid1=$!
+disown %+
 ./main >& out.2 &
 pid2=$!
+disown %+
 
 #
 # Run DTrace with different pid probes, each case is its own "epoch":
