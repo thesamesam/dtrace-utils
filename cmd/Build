@@ -50,7 +50,7 @@ fi\n"
 
 
 install::
-	mkdir -p $(INSTBINDIR) $(INSTSBINDIR) $(INSTMANDIR) \
+	mkdir -p $(INSTBINDIR) $(INSTSBINDIR) $(INSTMANDIR)/man8 \
 	      $(INSTLIBDIR)/dtrace
 	$(call describe-install-target,$(INSTSBINDIR),dtrace)
 	install -m 755 $(objdir)/dtrace $(INSTSBINDIR)
