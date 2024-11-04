@@ -99,15 +99,6 @@ if [ $? -ne 0 ]; then
 	cat dtrace.out
 	exit 1
 fi
-echo "my result: 10" > main.out2.expected
-if ! diff -q main.out2 main.out2.expected > /dev/null; then
-	echo '"my result"' looks wrong when using DTrace
-	echo === got ===
-	cat main.out2
-	echo === expected ===
-	cat main.out2.expected
-	exit 1
-fi
 
 # Check that the program output is 10 when the USDT probe is enabled.
 # That is, the PYRAMID_ENTRY_ENABLED() is-enabled checks should pass.
@@ -115,7 +106,7 @@ fi
 echo "my result: 10" > main.out2.expected
 
 if ! diff -q main.out2 main.out2.expected > /dev/null; then
-	echo '"my result"' looks wrong
+	echo '"my result"' looks wrong when using DTrace
 	echo === got ===
 	cat main.out2
 	echo === expected ===
