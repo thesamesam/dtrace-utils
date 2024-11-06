@@ -1237,7 +1237,7 @@ oom:
 		free((char *) argv[i].xlate);
 	}
 
-        dt_free(dtp, argv);
+	dt_free(dtp, argv);
 	return dt_set_errno(dtp, EDT_NOMEM);
 }
 
