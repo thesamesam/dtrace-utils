@@ -8,4 +8,4 @@
 # This test verifies that USDT and pid probes that share underlying probes
 # get the arguments correct for the USDT probes.
 
-exec $(dirname $_test)/pidprobes.sh $1 t ""
+exec $(dirname $_test)/tst.pidprobes.sh $1 t ""
