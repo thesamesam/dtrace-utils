@@ -208,7 +208,7 @@ static int fprobe_trampoline(dt_pcb_t *pcb, uint_t exitlbl)
 		 */
 		dmp = dt_module_lookup_by_name(dtp, prp->desc->mod);
 		if (dmp && prp->argc == 2) {
-			int32_t	btf_id = dt_tp_get_event_id(prp);
+			int32_t	btf_id = dt_tp_probe_get_id(prp);
 			int	i = dt_btf_func_argc(dtp, dmp->dm_btf, btf_id);
 
 			emit(dlp, BPF_LOAD(BPF_DW, BPF_REG_0, BPF_REG_8, i * 8));
@@ -239,7 +239,7 @@ static int fprobe_probe_info(dtrace_hdl_t *dtp, const dt_probe_t *prp,
 	if (btf_id <= 0)
 		goto done;
 
-	dt_tp_set_event_id(prp, btf_id);
+	dt_tp_probe_set_id(prp, btf_id);
 
 	if (strcmp(desc->prb, "return") == 0) {
 		/* Void function return probes only provide 1 argument. */
@@ -306,7 +306,7 @@ static int fprobe_prog_load(dtrace_hdl_t *dtp, const dt_probe_t *prp,
 		return fd;
 
 	rc = dt_bpf_prog_attach(prp->prov->impl->prog_type, atype, fd,
-				dt_tp_get_event_id(prp), dp, lvl, buf, sz);
+				dt_tp_probe_get_id(prp), dp, lvl, buf, sz);
 	close(fd);
 
 	return rc;
