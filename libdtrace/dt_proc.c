@@ -929,6 +929,9 @@ dt_proc_control(void *arg)
 		dpr->dpr_pid = Pgetpid(dpr->dpr_proc);
 	} else {
 		int noninvasive = 0;
+		int self_grab = 0;
+		int other_tracer = 0;
+		pid_t tracer_pid;
 
 		/*
 		 * "Shortlived" means that the monitoring of this process is not
@@ -942,21 +945,49 @@ dt_proc_control(void *arg)
 		 * else (like another DTrace instance).  No death notification
 		 * is ever sent.
 		 *
-		 * Also, obviously enough, never drop breakpoints in ourself!
+		 * Also, obviously enough, never drop breakpoints in ourself:
+		 * we define that widely enough that no grabs of any thread of
+		 * this DTrace process will be invasive.
+		 *
+		 * If this is *not* a shortlived grab, simply refuse the grab
+		 * if this is being debugged by someone else or is ourself, or
+		 * is PID 1: on explicit request, we'll still grab system
+		 * daemons (if you use dtrace -p, we assume you actually want to
+		 * do what you asked for), but grabs that cannot succeed should
+		 * still be refused.
+		 *
+		 * (If the process is being *debugged* by ourself -- as in
+		 * literally this thread -- we can do invasive grabs just fine.)
 		 */
-		if (datap->dpcd_flags & DTRACE_PROC_SHORTLIVED) {
-			pid_t tracer_pid, tgid;
 
+		tracer_pid = Ptracer_pid(dpr->dpr_pid);
+		self_grab = (dpr->dpr_pid == getpid() ||
+			     Ptgid(dpr->dpr_pid) == (Ptgid(getpid())));
+		other_tracer = (tracer_pid != 0 && tracer_pid != getpid());
+
+		if (datap->dpcd_flags & DTRACE_PROC_SHORTLIVED) {
 			noninvasive = 1;
 			dpr->dpr_notifiable = 0;
-			tracer_pid = Ptracer_pid(dpr->dpr_pid);
-			tgid = Ptgid(dpr->dpr_pid);
 
 			if ((Psystem_daemon(dpr->dpr_pid, dtp->dt_useruid,
 				    dtp->dt_sysslice) > 0) ||
-			    (tracer_pid == getpid()) ||
-			    (tgid == getpid()))
+			     other_tracer || self_grab)
 				noninvasive = 2;
+		} else {
+			const char *reason;
+
+			if (dpr->dpr_pid == 1 || other_tracer || self_grab) {
+				if (dpr->dpr_pid == 1)
+					reason = "is init";
+				else if (other_tracer)
+					reason = "being traced by someone else";
+				else
+					reason = "PID is ourself";
+
+				dt_proc_error(dtp, dpr, "not safe to stop pid %li for grabbing: %s\n",
+					      (long)dpr->dpr_pid, reason);
+				pthread_exit(NULL);
+			}
 		}
 
 		if ((dpr->dpr_proc = Pgrab(dpr->dpr_pid, noninvasive, 0,
