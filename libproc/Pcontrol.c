@@ -39,8 +39,6 @@
 
 char	procfs_path[PATH_MAX] = "/proc";
 
-static	int Pgrabbing = 0; 	/* A Pgrab() is underway. */
-
 static int systemd_system = -1; /* 1 if this is a system running systemd. */
 
 static void Pfree_internal(struct ps_prochandle *P);
@@ -327,9 +325,7 @@ Pgrab(pid_t pid, int noninvasiveness, int already_ptraced, void *wrap_arg,
 			/*
 			 * Pmemfd() grabbed, try to ptrace().
 			 */
-			Pgrabbing = 1;
 			*perr = Ptrace(P, 1);
-			Pgrabbing = 0;
 
 			if (*perr < 0) {
 				if (noninvasiveness < 1) {
@@ -1373,10 +1369,7 @@ Ptrace(struct ps_prochandle *P, int stopped)
 
 	if (wrapped_ptrace(P, PTRACE_SEIZE, P->pid, 0, LIBPROC_PTRACE_OPTIONS |
 		    PTRACE_O_TRACECLONE) < 0) {
-		if (!Pgrabbing)
-			goto err;
-		else
-			goto err2;
+		goto err;
 	}
 
 	P->ptraced = TRUE;
@@ -1386,10 +1379,7 @@ Ptrace(struct ps_prochandle *P, int stopped)
 
 		if (wrapped_ptrace(P, PTRACE_INTERRUPT, P->pid, 0, 0) < 0) {
 			wrapped_ptrace(P, PTRACE_DETACH, P->pid, 0, 0);
-			if (!Pgrabbing)
-				goto err;
-			else
-				goto err2;
+			goto err;
 		}
 
 		/*
@@ -1406,14 +1396,13 @@ Ptrace(struct ps_prochandle *P, int stopped)
 		if ((P->state != PS_TRACESTOP) &&
 		    (P->state != PS_STOP)) {
 			err = -ECHILD;
-			goto err2;
+			goto err;
 		}
 	}
 
 	return err;
 err:
 	err = -errno;
-err2:
 	/*
 	 * Note a subtlety here: the Ptrace_count may have been reduced, and the state
 	 * popped to match, by an exec() or other operation within the Pwait().
