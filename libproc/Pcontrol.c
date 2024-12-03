@@ -1455,12 +1455,22 @@ Puntrace(struct ps_prochandle *P, int leave_stopped)
 	int prev_state;
 
 	/*
-	 * Protect against unbalanced Ptrace()/Puntrace().
+	 * Protect against unbalanced Ptrace()/Puntrace() and already-
+	 * terminated processes; operations interrupted by process termination
+	 * might reasonably do a Puntrace() to balance out a previous Ptrace(),
+	 * but everything is freed and we just want to drop out after balancing
+	 * the ptrace() count.
 	 */
 	if ((!P->ptraced) || (P->ptrace_count == 0))
 		return;
 
 	P->ptrace_count--;
+
+	if (P->released) {
+		_dprintf("%i: Puntrace(): early return, process is released\n", P->pid);
+		return;
+	}
+
 	prev_state = Ppop_state(P);
 
 	/*
