@@ -66,6 +66,7 @@ static int add_bkpt(struct ps_prochandle *P, uintptr_t addr,
     void *data);
 static void delete_bkpt_handler(struct bkpt *bkpt);
 static jmp_buf **single_thread_unwinder_pad(struct ps_prochandle *unused);
+static void Pdump_proc_status(pid_t pid);
 
 static ptrace_lock_hook_fun *ptrace_lock_hook;
 static waitpid_lock_hook_fun *waitpid_lock_hook;
@@ -332,10 +333,12 @@ Pgrab(pid_t pid, int noninvasiveness, int already_ptraced, void *wrap_arg,
 
 			if (*perr < 0) {
 				if (noninvasiveness < 1) {
+					_dprintf("%i: Pgrab(): not grabbed.\n", P->pid);
 					Pfree_internal(P);
 					return NULL;
 				}
 				close(P->memfd);
+				_dprintf("%i: Pgrab(): grabbed noninvasively.\n", P->pid);
 				noninvasiveness = 2;
 			}
 		} else {
@@ -719,7 +722,9 @@ Pwait_internal(struct ps_prochandle *P, boolean_t block, int *return_early)
 				return 0;
 
 			if (errno == ECHILD) {
+				_dprintf("%i: Pwait: got ECHILD from waitpid(), state %i, trace count %i, halted %i\n", P->pid, P->state, P->ptrace_count, P->ptrace_halted);
 				P->state = PS_DEAD;
+				Pdump_proc_status(P->pid);
 				return 0;
 			}
 
@@ -1262,7 +1267,7 @@ Ppush_state(struct ps_prochandle *P, int state)
 
 	s->state = state;
 	dt_list_prepend(&P->ptrace_states, s);
-	_dprintf("Ppush_state(): ptrace_count %i, state %i\n", P->ptrace_count, s->state);
+	_dprintf("%i: Ppush_state(): ptrace_count %i, state %i\n", P->pid, P->ptrace_count, s->state);
 
 	return s;
 }
@@ -1278,7 +1283,7 @@ Ppop_state(struct ps_prochandle *P)
 
 	s = dt_list_next(&P->ptrace_states);
 	dt_list_delete(&P->ptrace_states, s);
-	_dprintf("Ppop_state(): ptrace_count %i, state %i\n", P->ptrace_count+1, s->state);
+	_dprintf("%i: Ppop_state(): ptrace_count %i, state %i\n", P->pid, P->ptrace_count+1, s->state);
 	state = s->state;
 	free(s);
 	return state;
@@ -1422,6 +1427,9 @@ err_nostate:
 	if (P->ptrace_count == 0 && ptrace_lock_hook)
 		ptrace_lock_hook(P, P->wrap_arg, 0);
 
+	_dprintf("Ptrace(): error return (possibly other tracer), trace count now %i: %s\n",
+		 P->ptrace_count, strerror(errno));
+
 	if (err != -ECHILD)
 		return err;
 	else
@@ -1511,8 +1519,11 @@ Puntrace(struct ps_prochandle *P, int leave_stopped)
 		P->state = PS_RUN;
 		P->ptraced = FALSE;
 		if ((wrapped_ptrace(P, PTRACE_DETACH, P->pid, 0, 0) < 0) &&
-		    (errno == ESRCH))
+		    (errno == ESRCH)) {
+			_dprintf("%i: Punbkpt(): -ESRCH, process is dead.\n",
+				 P->pid);
 			P->state = PS_DEAD;
+		}
 		P->ptrace_halted = FALSE;
 		P->info_valid = 0;
 	}
@@ -1812,7 +1823,7 @@ Punbkpt(struct ps_prochandle *P, uintptr_t addr)
 		if (Preset_bkpt_ip(P, P->tracing_bkpt) < 0)
 			switch (errno) {
 			case ESRCH:
-				_dprintf("%i: -ESRCH, process is dead.\n",
+				_dprintf("%i: Punbkpt(): -ESRCH, process is dead.\n",
 				    P->pid);
 				P->state = PS_DEAD;
 				return;
@@ -1870,7 +1881,8 @@ Punbkpt_child_poke(struct ps_prochandle *P, pid_t pid, bkpt_t *bkpt)
 		bkpt->bkpt_addr, bkpt->orig_insn) < 0)
 		switch (errno) {
 		case ESRCH:
-			_dprintf("%i: -ESRCH, process is dead.\n", child_pid);
+			_dprintf("%i: Punbkpt_child_poke(): -ESRCH, process is dead.\n",
+				 child_pid);
 			if (!pid)
 				P->state = PS_DEAD;
 			return;
@@ -2181,8 +2193,11 @@ Pbkpt_continue(struct ps_prochandle *P)
 		if (wrapped_ptrace(P, PTRACE_CONT, P->pid, 0, 0) < 0) {
 			int err = errno;
 			if (err == ESRCH) {
-				if ((kill(P->pid, 0) < 0) && errno == ESRCH)
+				if ((kill(P->pid, 0) < 0) && errno == ESRCH) {
+					_dprintf("%i: Pbpkt_continue(): Got ESRCH, process is dead.\n",
+						 P->pid);
 					P->state = PS_DEAD;
+				}
 			}
 			/*
 			 * Since we must have an outstanding Ptrace() anyway,
@@ -2758,6 +2773,36 @@ Phastty(pid_t pid)
 
 	free(buf);
 	return tty != 0;
+}
+
+/*
+ * Dump /proc/$pid/status into the debug log.
+ */
+static void
+Pdump_proc_status(pid_t pid)
+{
+	char status[PATH_MAX];
+	FILE *fp;
+	char *line = NULL;
+	size_t len;
+
+	snprintf(status, sizeof(status), "/proc/%i/status", pid);
+
+	if ((fp = fopen(status, "r")) == NULL) {
+		_dprintf("Process is dead.\n");
+		return;
+	}
+
+	while (getline(&line, &len, fp) >= 0) {
+		if (strlen(line) > 0) {
+			if (line[strlen(line) - 1] == '\n')
+				line[strlen(line)-1] = '\0';
+			_dprintf("%li: %s\n", (long)pid, line);
+		}
+	}
+	free(line);
+	fclose(fp);
+	return;
 }
 
 /*

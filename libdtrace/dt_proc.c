@@ -870,6 +870,9 @@ dt_proc_control(void *arg)
 	int err;
 	jmp_buf exec_jmp;
 
+	dt_dprintf("%i: process control thread %i starting.\n", dpr->dpr_pid,
+		   gettid());
+
 	/*
 	 * Set up global libproc hooks that must be active before any processes
 	 * are grabbed or created.
@@ -1421,7 +1424,8 @@ dt_proc_control_cleanup(void *arg)
 	 * out by ptrace() wrappers above us in the call stack, since the whole
 	 * thread is going away.
 	 */
-	dt_dprintf("%i: process control thread going away.\n", dpr->dpr_pid);
+	dt_dprintf("%i: process control thread %i going away.\n", dpr->dpr_pid,
+		   gettid());
 	if(dpr->dpr_lock_count_ctrl == 0 ||
 	    !pthread_equal(dpr->dpr_lock_holder, pthread_self()))
 		dt_proc_lock(dpr);
