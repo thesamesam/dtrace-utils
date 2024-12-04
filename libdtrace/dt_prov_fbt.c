@@ -57,6 +57,9 @@ static const dtrace_pattr_t	pattr = {
 { DTRACE_STABILITY_PRIVATE, DTRACE_STABILITY_PRIVATE, DTRACE_CLASS_ISA },
 };
 
+dt_provimpl_t			dt_fbt_fprobe;
+dt_provimpl_t			dt_fbt_kprobe;
+
 /*
  * Scan the PROBE_LIST file and add entry and return probes for every function
  * that is listed.
@@ -64,7 +67,6 @@ static const dtrace_pattr_t	pattr = {
 static int populate(dtrace_hdl_t *dtp)
 {
 	dt_provider_t		*prv;
-	dt_provimpl_t		*impl;
 	FILE			*f;
 	char			*buf = NULL;
 	char			*p;
@@ -73,9 +75,9 @@ static int populate(dtrace_hdl_t *dtp)
 	dtrace_syminfo_t	sip;
 	dtrace_probedesc_t	pd;
 
-	impl = BPF_HAS(dtp, BPF_FEAT_FENTRY) ? &dt_fbt_fprobe : &dt_fbt_kprobe;
+	dt_fbt = BPF_HAS(dtp, BPF_FEAT_FENTRY) ? dt_fbt_kprobe : dt_fbt_kprobe;
 
-	prv = dt_provider_create(dtp, prvname, impl, &pattr, NULL);
+	prv = dt_provider_create(dtp, prvname, &dt_fbt, &pattr, NULL);
 	if (prv == NULL)
 		return -1;			/* errno already set */
 
@@ -417,7 +419,7 @@ static int kprobe_attach(dtrace_hdl_t *dtp, const dt_probe_t *prp, int bpf_fd)
  *
  * If there is an event FD, we close it.
  *
- * We also try to remove any uprobe that may have been created for the probe.
+ * We also try to remove any kprobe that may have been created for the probe.
  * This is harmless for probes that didn't get created.  If the removal fails
  * for some reason we are out of luck - fortunately it is not harmful to the
  * system as a whole.
@@ -462,4 +464,9 @@ dt_provimpl_t	dt_fbt_kprobe = {
 	.attach		= &kprobe_attach,
 	.detach		= &kprobe_detach,
 	.probe_destroy	= &dt_tp_probe_destroy,
+};
+
+dt_provimpl_t	dt_fbt = {
+	.name		= prvname,
+	.populate	= &populate,
 };
