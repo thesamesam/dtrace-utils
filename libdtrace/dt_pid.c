@@ -997,7 +997,7 @@ dt_pid_create_usdt_probes_proc(dtrace_hdl_t *dtp, dt_proc_t *dpr,
 					     "Cannot get name of mapping containing "
 					     "%sprobe %s for pid %d\n",
 					     tp->tracepoint.is_enabled ? "is-enabled ": "",
-					     psp.pps_prb, dpr->dpr_pid);
+					     prb, dpr->dpr_pid);
 				goto oom;
 			}
 
